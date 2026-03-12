@@ -1,0 +1,10 @@
+raw/
+zips/
+__pycache__/
+*.pyc
+*.db
+*.db.*
+setup_log.txt
+bls_oes_areas.csv
+.DS_Store
+Thumbs.db
