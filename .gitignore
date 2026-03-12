@@ -8,3 +8,4 @@ setup_log.txt
 bls_oes_areas.csv
 .DS_Store
 Thumbs.db
+.streamlit/secrets.toml

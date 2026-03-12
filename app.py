@@ -55,6 +55,25 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Authentication gate ──────────────────────────────────────────────────────
+ALLOWED_DOMAIN = "validatedinsights.com"
+
+if not st.user.is_logged_in:
+    st.header("IPEDS Completions Explorer")
+    st.write("Please sign in with your @validatedinsights.com Google account.")
+    if st.button("🔐 Sign in with Google"):
+        st.login()
+    st.stop()
+
+if not st.user.email or not st.user.email.lower().endswith(f"@{ALLOWED_DOMAIN}"):
+    st.error(
+        f"Access restricted to @{ALLOWED_DOMAIN} accounts. "
+        f"You are signed in as {st.user.email}."
+    )
+    if st.button("Sign out"):
+        st.logout()
+    st.stop()
+
 # ── Reference data ────────────────────────────────────────────────────────────
 
 AWARD_LEVELS = {
