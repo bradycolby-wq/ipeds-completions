@@ -1698,16 +1698,24 @@ def main():
 
                 emp_yr_cols = sorted([c for c in occ_pivot.columns if isinstance(c, (int, np.integer))])
 
-                # Historical CAGR for each occupation
+                # Historical CAGRs for each occupation (3-yr and 10-yr)
+                ey_first = emp_yr_cols[0] if emp_yr_cols else None
+                ey_last = emp_yr_cols[-1] if emp_yr_cols else None
+                ey_3ago = ey_last - 3 if ey_last else None
                 if len(emp_yr_cols) >= 2:
-                    ey_first, ey_last = emp_yr_cols[0], emp_yr_cols[-1]
                     en = ey_last - ey_first
-                    def occ_cagr(row):
-                        fv, lv = row.get(ey_first), row.get(ey_last)
-                        if fv and lv and fv > 0 and lv > 0 and en > 0:
-                            return ((lv / fv) ** (1 / en) - 1) * 100
+
+                    def _occ_cagr(row, start_col, n):
+                        fv, lv = row.get(start_col), row.get(ey_last)
+                        if fv and lv and fv > 0 and lv > 0 and n > 0:
+                            return ((lv / fv) ** (1 / n) - 1) * 100
                         return None
-                    occ_pivot["Hist. CAGR"] = occ_pivot.apply(occ_cagr, axis=1)
+
+                    if ey_3ago in emp_yr_cols:
+                        occ_pivot["3-yr CAGR"] = occ_pivot.apply(
+                            lambda r: _occ_cagr(r, ey_3ago, 3), axis=1)
+                    occ_pivot["10-yr CAGR"] = occ_pivot.apply(
+                        lambda r: _occ_cagr(r, ey_first, en), axis=1)
 
                 # Projected CAGR from employment_projections table
                 if not df_proj.empty:
@@ -1727,13 +1735,14 @@ def main():
                 })
                 occ_pivot = occ_pivot.drop(columns=["occ_code"])
 
-                display_cols = ["Occupation"] + emp_yr_cols
-                if f"Median Wage ({latest_emp_year})" in occ_pivot.columns:
-                    display_cols.append(f"Median Wage ({latest_emp_year})")
-                if "Hist. CAGR" in occ_pivot.columns:
-                    display_cols.append("Hist. CAGR")
-                if "Proj. CAGR" in occ_pivot.columns:
-                    display_cols.append("Proj. CAGR")
+                wage_label = f"Median Wage ({latest_emp_year})"
+                display_cols = ["Occupation"]
+                if wage_label in occ_pivot.columns:
+                    display_cols.append(wage_label)
+                display_cols += emp_yr_cols
+                for _cagr_col in ["3-yr CAGR", "10-yr CAGR", "Proj. CAGR"]:
+                    if _cagr_col in occ_pivot.columns:
+                        display_cols.append(_cagr_col)
 
                 occ_pivot = occ_pivot[[c for c in display_cols if c in occ_pivot.columns]]
 
@@ -1757,9 +1766,14 @@ def main():
                 }
                 for y in emp_yr_cols:
                     emp_col_cfg[y] = st.column_config.TextColumn(str(y), width=82)
-                if "Hist. CAGR" in occ_pivot.columns:
-                    emp_col_cfg["Hist. CAGR"] = st.column_config.NumberColumn(
-                        f"Hist. CAGR ({emp_yr_cols[0]}-{emp_yr_cols[-1]})",
+                if "3-yr CAGR" in occ_pivot.columns:
+                    emp_col_cfg["3-yr CAGR"] = st.column_config.NumberColumn(
+                        f"3-yr CAGR ({ey_3ago} → {ey_last})",
+                        format="%.1f%%", width=90,
+                    )
+                if "10-yr CAGR" in occ_pivot.columns:
+                    emp_col_cfg["10-yr CAGR"] = st.column_config.NumberColumn(
+                        f"10-yr CAGR ({ey_first} → {ey_last})",
                         format="%.1f%%", width=90,
                     )
                 if "Proj. CAGR" in occ_pivot.columns:
