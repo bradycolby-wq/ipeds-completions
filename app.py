@@ -782,9 +782,37 @@ def main():
     )
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
+    # ── Preset program definitions ──────────────────────────────────────────
+    # Each preset: display name -> dict with "cips" (list of 6-digit codes)
+    # and "level" (label matching AWARD_LEVELS values or AGGREGATE_LEVELS keys)
+    PROGRAM_PRESETS = {
+        "MBA": {
+            "cips": ["52.0101", "52.0201", "52.1301"],
+            "level": "Master's degree",
+        },
+    }
+
     with st.sidebar:
         st.markdown("## 🎓 IPEDS Explorer")
         st.caption("Completions 2014–15 → 2023–24")
+
+        # Quick-select presets
+        preset_names = ["— Select a program —"] + list(PROGRAM_PRESETS.keys())
+        chosen_preset = st.selectbox(
+            "Quick Select",
+            options=preset_names,
+            index=0,
+            key="preset_select",
+        )
+
+        if chosen_preset != "— Select a program —":
+            preset = PROGRAM_PRESETS[chosen_preset]
+            st.session_state["_preset_cips"] = preset["cips"]
+            st.session_state["_preset_level"] = preset["level"]
+        else:
+            st.session_state.pop("_preset_cips", None)
+            st.session_state.pop("_preset_level", None)
+
         st.divider()
 
         # 1. Geography
@@ -842,7 +870,15 @@ def main():
             selected_cip_labels = []
             cip_patterns = ()  # empty = no filter = all
         else:
-            default_cip_labels = [l for _, l in cip_options if l.startswith("51.3801")]
+            # Use preset CIP codes if a quick-select is active, else default
+            if "_preset_cips" in st.session_state:
+                _pcips = st.session_state["_preset_cips"]
+                default_cip_labels = [
+                    l for _, l in cip_options
+                    if any(l.startswith(c) for c in _pcips)
+                ]
+            else:
+                default_cip_labels = [l for _, l in cip_options if l.startswith("51.3801")]
             selected_cip_labels = st.multiselect(
                 "CIP code(s):",
                 options=[label for _, label in cip_options],
@@ -876,7 +912,11 @@ def main():
             selected_level_labels = list(AWARD_LEVELS.values())
             selected_awlevels = tuple(AWARD_LEVELS.keys())
         else:
-            default_levels = ["Bachelor's degree"]
+            # Use preset level if a quick-select is active, else default
+            if "_preset_level" in st.session_state:
+                default_levels = [st.session_state["_preset_level"]]
+            else:
+                default_levels = ["Bachelor's degree"]
             selected_level_labels = st.multiselect(
                 "Award level(s):",
                 options=level_option_labels,
