@@ -597,13 +597,20 @@ def run_employment_query(
     for s2010, s2018 in sorted(soc_2010_rows, key=lambda x: x[1]):
         if s2010 not in soc_2010_to_2018_map:
             soc_2010_to_2018_map[s2010] = s2018
+    # Override: "All Other" codes (XX-XX99) should map to their "All Other"
+    # successor, not inflate a specific occupation (e.g. 15-1199 -> 15-1299)
+    for s2010, s2018 in soc_2010_rows:
+        if s2010[-2:] == "99" and s2018[-2:] == "99" and s2010[:3] == s2018[:3]:
+            soc_2010_to_2018_map[s2010] = s2018
 
     # 2a. Handle BLS combined codes (2019-2020)
     # BLS sometimes publishes combined codes when detail codes can't be
     # separately disclosed. Include them and remap to detail codes.
     _COMBINED_SOC = {
+        "15-1245": {"15-1242", "15-1243"},  # DB Admins + Architects
         "15-1256": {"15-1252", "15-1253"},  # Software Devs + QA
         "15-1257": {"15-1254", "15-1255"},  # Web Devs + Designers
+        "15-2098": {"15-2051", "15-2099"},  # Data Scientists + Math Sci Other
     }
     combined_remap = {}  # combined_code -> detail_code to remap to
     for combined, details in _COMBINED_SOC.items():
