@@ -352,6 +352,47 @@ def compute_projection(sel_dict, national_dict, selected_awlevels, n_forward=5):
     return list(zip(proj_years, np.maximum(result, 0).astype(int)))
 
 
+def compute_emp_cagr_projection(sel_dict: dict, emp_cagr: float | None, n_forward: int = 5):
+    """Project completions forward using employment projection CAGR.
+
+    Compounds the last historical completions value at the employment CAGR.
+    Returns list[(year, projected_completions)] or None.
+    """
+    if emp_cagr is None:
+        return None
+    years = sorted(sel_dict.keys())
+    if not years:
+        return None
+    last_year = years[-1]
+    last_val = sel_dict[last_year]
+    if last_val <= 0:
+        return None
+    proj_years = list(range(last_year + 1, last_year + n_forward + 1))
+    return [
+        (y, max(int(round(last_val * (1 + emp_cagr) ** (y - last_year))), 0))
+        for y in proj_years
+    ]
+
+
+def compute_blended_projection(nces_proj, emp_proj, weight_nces: float = 0.5):
+    """Blend NCES-constrained and employment-CAGR projections (50/50 average).
+
+    Both inputs are list[(year, value)]. Returns list[(year, blended_value)] or None.
+    """
+    if not nces_proj or not emp_proj:
+        return None
+    nces_d = dict(nces_proj)
+    emp_d = dict(emp_proj)
+    common = sorted(set(nces_d) & set(emp_d))
+    if not common:
+        return None
+    w = weight_nces
+    return [
+        (y, max(int(round(w * nces_d[y] + (1 - w) * emp_d[y])), 0))
+        for y in common
+    ]
+
+
 @st.cache_data(show_spinner=False, ttl=600)
 def run_institution_query(
     cip_patterns: tuple,
@@ -747,6 +788,94 @@ def get_employment_projections(
     return df
 
 
+@st.cache_data(show_spinner=False, ttl=600)
+def get_emp_proj_cagr(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    geo_key: str,
+    geo_values: tuple,
+) -> float | None:
+    """Return weighted-average employment projection CAGR for SOC codes
+    mapped to the given CIP codes/geography, or None if unavailable."""
+    if not cip_patterns:
+        return None  # "All CIPs" → no meaningful SOC mapping
+
+    conn = get_conn()
+
+    # Award-level group filter (mirrors run_employment_query)
+    UNDERGRAD = {1, 2, 3, 4, 5}
+    GRADUATE = {6, 7, 8, 17, 18, 19}
+    has_ug = bool(set(awlevels) & UNDERGRAD)
+    has_gr = bool(set(awlevels) & GRADUATE)
+    if has_ug and has_gr:
+        awf = ""
+    elif has_gr:
+        awf = " AND awlevel_group IN ('all', 'graduate')"
+    else:
+        awf = " AND awlevel_group = 'all'"
+
+    # SOC 2018 codes from CIP-SOC crosswalk
+    cip_clauses, cip_params = [], []
+    for p in cip_patterns:
+        cip_clauses.append("cipcode LIKE ?" if "%" in p else "cipcode = ?")
+        cip_params.append(p)
+    cip_where = " OR ".join(cip_clauses)
+    soc_rows = conn.execute(
+        f"SELECT DISTINCT soc_code FROM cip_soc_crosswalk WHERE ({cip_where}){awf}",
+        cip_params,
+    ).fetchall()
+    soc_codes = tuple(r[0] for r in soc_rows)
+    if not soc_codes:
+        conn.close()
+        return None
+
+    # Latest-year employment weights
+    soc_ph = ",".join("?" * len(soc_codes))
+    area_where, area_params = "", []
+    if geo_key == "national":
+        area_where = "AND area_type = 1"
+    elif geo_key == "state" and geo_values:
+        fips = [STABBR_TO_FIPS.get(s, "") for s in geo_values]
+        fips = [f for f in fips if f]
+        if fips:
+            area_where = f"AND area_type = 2 AND area_code IN ({','.join('?' * len(fips))})"
+            area_params = fips
+    elif geo_key == "metro" and geo_values:
+        bls = ["00" + str(c).zfill(5) for c in geo_values]
+        area_where = f"AND area_type = 4 AND area_code IN ({','.join('?' * len(bls))})"
+        area_params = bls
+
+    latest_emp = pd.read_sql_query(
+        f"""SELECT occ_code, SUM(tot_emp) AS tot_emp
+            FROM oes_employment
+            WHERE year = (SELECT MAX(year) FROM oes_employment)
+              AND occ_code IN ({soc_ph}) {area_where}
+            GROUP BY occ_code""",
+        conn,
+        params=list(soc_codes) + area_params,
+    )
+    conn.close()
+
+    if latest_emp.empty:
+        return None
+
+    # Employment projections
+    df_proj = get_employment_projections(
+        soc_codes=soc_codes, geo_key=geo_key, geo_values=tuple(geo_values),
+    )
+    if df_proj.empty or "cagr" not in df_proj.columns:
+        return None
+
+    merged = df_proj.merge(latest_emp, on="occ_code", how="inner")
+    merged = merged.dropna(subset=["cagr", "tot_emp"])
+    if merged.empty or merged["tot_emp"].sum() <= 0:
+        return None
+
+    return float(
+        (merged["cagr"] * merged["tot_emp"]).sum() / merged["tot_emp"].sum()
+    )
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 def main():
     # One-time DB prep
@@ -1032,6 +1161,22 @@ def main():
     national_dict = run_national_totals(selected_awlevels)
     projection = compute_projection(sel_dict, national_dict, selected_awlevels)
 
+    # ── Employment-informed projection ────────────────────────────────────────
+    emp_cagr_for_completions = None
+    emp_projection = None
+    blended_projection = None
+
+    if not all_cips:  # Employment mapping only meaningful for specific CIPs
+        emp_cagr_for_completions = get_emp_proj_cagr(
+            cip_patterns=cip_patterns,
+            awlevels=selected_awlevels,
+            geo_key=geo_key,
+            geo_values=tuple(geo_values),
+        )
+        if emp_cagr_for_completions is not None:
+            emp_projection = compute_emp_cagr_projection(sel_dict, emp_cagr_for_completions)
+            blended_projection = compute_blended_projection(projection, emp_projection)
+
     # ── Summary metrics ───────────────────────────────────────────────────────
     agg = df_totals
     first_yr, last_yr = agg.index.min(), agg.index.max()
@@ -1047,13 +1192,16 @@ def main():
     val_3ago = int(agg[yr_3ago]) if yr_3ago in agg.index else None
     cagr_3 = (last_val / val_3ago) ** (1 / 3) - 1 if val_3ago else None
 
-    # Projected CAGR
-    if projection and last_val > 0:
-        proj_last_yr, proj_last_val = projection[-1]
+    # Projected CAGR — use blended if available, else NCES-only
+    _display_proj = blended_projection or projection
+    if _display_proj and last_val > 0:
+        proj_last_yr, proj_last_val = _display_proj[-1]
         n_proj = proj_last_yr - last_yr
         cagr_proj = (proj_last_val / last_val) ** (1 / n_proj) - 1 if n_proj > 0 else None
     else:
         proj_last_yr, cagr_proj = last_yr + 5, None
+
+    _proj_label = "Blended" if blended_projection else "NCES"
 
     # Institution count
     n_inst = df_inst["unitid"].nunique()
@@ -1069,7 +1217,7 @@ def main():
         f"{cagr_3:+.1%}" if cagr_3 is not None else "N/A",
     )
     m4.metric(
-        f"Projected CAGR ({yr_label(last_yr)} → {yr_label(proj_last_yr)})",
+        f"Proj. CAGR [{_proj_label}] ({yr_label(last_yr)} → {yr_label(proj_last_yr)})",
         f"{cagr_proj:+.1%}" if cagr_proj is not None else "N/A",
     )
     m5.metric("Reporting Institutions", f"{n_inst:,}")
@@ -1129,36 +1277,79 @@ def main():
             marker=dict(size=9),
         )
 
-    # ── NCES-constrained projection (5 years forward) ───────────────────────
+    # ── Projection lines (up to 3: NCES, Employment CAGR, Blended) ──────────
     chart_years = list(all_years)
+    _has_any_proj = projection or blended_projection
+    last_actual_val = int(df_totals[all_years[-1]]) if _has_any_proj else 0
 
-    if projection:
-        proj_years_list = [p[0] for p in projection]
-        proj_vals_list = [p[1] for p in projection]
+    if _has_any_proj:
+        _ref_proj = projection or blended_projection
+        proj_years_list = [p[0] for p in _ref_proj]
         chart_years = list(all_years) + proj_years_list
 
-        # Faint gray shaded region over the projection area
+        # Gray shaded projection region
         fig.add_vrect(
             x0=all_years[-1] + 0.5,
             x1=proj_years_list[-1] + 0.5,
-            fillcolor="#E5E7EB",
-            opacity=0.3,
-            layer="below",
-            line_width=0,
+            fillcolor="#E5E7EB", opacity=0.3, layer="below", line_width=0,
         )
 
-        # Projection line — semi-transparent orange dashes matching the actuals color
+    # 1. NCES-constrained projection
+    if projection:
+        _nces_yrs = [p[0] for p in projection]
+        _nces_vals = [p[1] for p in projection]
+        _nces_op = 0.3 if blended_projection else 0.45
+        _nces_txt_op = 0.4 if blended_projection else 0.6
         fig.add_trace(go.Scatter(
-            x=[all_years[-1]] + proj_years_list,
-            y=[int(df_totals[all_years[-1]])] + proj_vals_list,
-            mode="lines+markers+text",
-            name="Projected (NCES-constrained)",
-            line=dict(color="rgba(242, 104, 34, 0.45)", width=2.5, dash="dash"),
-            marker=dict(size=7, symbol="diamond", color="rgba(242, 104, 34, 0.45)"),
-            text=[""] + [f"{v:,}" for v in proj_vals_list],
+            x=[all_years[-1]] + _nces_yrs,
+            y=[last_actual_val] + _nces_vals,
+            mode="lines+markers" + ("" if blended_projection else "+text"),
+            name="NCES-constrained",
+            line=dict(color=f"rgba(242, 104, 34, {_nces_op})", width=2, dash="dash"),
+            marker=dict(size=6, symbol="diamond", color=f"rgba(242, 104, 34, {_nces_op})"),
+            text=[""] + [f"{v:,}" for v in _nces_vals],
             textposition="top center",
-            textfont=dict(size=10, color="rgba(242, 104, 34, 0.6)"),
-            hovertemplate="%{y:,.0f} (projected)<extra></extra>",
+            textfont=dict(size=9, color=f"rgba(242, 104, 34, {_nces_txt_op})"),
+            hovertemplate="%{y:,.0f} (NCES projection)<extra></extra>",
+            showlegend=True,
+        ))
+
+    # 2. Employment-CAGR projection
+    if emp_projection:
+        _emp_yrs = [p[0] for p in emp_projection]
+        _emp_vals = [p[1] for p in emp_projection]
+        _emp_op = 0.3 if blended_projection else 0.45
+        _emp_txt_op = 0.4 if blended_projection else 0.6
+        fig.add_trace(go.Scatter(
+            x=[all_years[-1]] + _emp_yrs,
+            y=[last_actual_val] + _emp_vals,
+            mode="lines+markers" + ("" if blended_projection else "+text"),
+            name="Employment CAGR",
+            line=dict(color=f"rgba(15, 134, 193, {_emp_op})", width=2, dash="dot"),
+            marker=dict(size=6, symbol="triangle-up", color=f"rgba(15, 134, 193, {_emp_op})"),
+            text=[""] + [f"{v:,}" for v in _emp_vals],
+            textposition="bottom center",
+            textfont=dict(size=9, color=f"rgba(15, 134, 193, {_emp_txt_op})"),
+            hovertemplate="%{y:,.0f} (employment CAGR projection)<extra></extra>",
+            showlegend=True,
+        ))
+
+    # 3. Blended projection (primary emphasis when available)
+    if blended_projection:
+        _bl_yrs = [p[0] for p in blended_projection]
+        _bl_vals = [p[1] for p in blended_projection]
+        fig.add_trace(go.Scatter(
+            x=[all_years[-1]] + _bl_yrs,
+            y=[last_actual_val] + _bl_vals,
+            mode="lines+markers+text",
+            name="Blended",
+            line=dict(color="rgba(101, 163, 59, 0.7)", width=3, dash="dash"),
+            marker=dict(size=8, symbol="circle", color="rgba(101, 163, 59, 0.7)"),
+            text=[""] + [f"{v:,}" for v in _bl_vals],
+            textposition="top center",
+            textfont=dict(size=10, color="rgba(101, 163, 59, 0.85)"),
+            hovertemplate="%{y:,.0f} (blended projection)<extra></extra>",
+            showlegend=True,
         ))
 
     chart_tick_labels = [yr_label(y) for y in chart_years]
@@ -1182,7 +1373,7 @@ def main():
             rangemode="tozero",
         ),
         hovermode="x unified",
-        showlegend=False,
+        showlegend=bool(blended_projection),
         height=520,
         margin=dict(t=90, b=60, l=70, r=20),
         plot_bgcolor="white",
@@ -1191,6 +1382,19 @@ def main():
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    # Projection methodology note
+    if blended_projection:
+        st.caption(
+            f"**Projection lines:** NCES-constrained (supply-side, orange) reflects historical share "
+            f"of projected national completions. Employment CAGR (demand-side, blue) grows completions "
+            f"at the BLS-projected employment growth rate ({emp_cagr_for_completions:+.1%}/yr). "
+            f"Blended (green) is the 50/50 average of both."
+        )
+    elif projection:
+        st.caption(
+            "**Projection:** NCES-constrained model based on historical share of projected national completions."
+        )
 
     # ── YoY change bar chart ───────────────────────────────────────────────────
     df_yoy = df.groupby("year")["completions"].sum().reset_index().sort_values("year")
@@ -1212,15 +1416,16 @@ def main():
         showlegend=False,
     ))
 
-    # Projected YoY bars (semi-transparent)
-    if projection:
+    # Projected YoY bars (semi-transparent) – use blended when available
+    _yoy_proj = blended_projection or projection
+    if _yoy_proj:
         last_actual = int(df_totals[all_years[-1]])
-        proj_chain = [last_actual] + [p[1] for p in projection]
-        proj_yoy_years = [p[0] for p in projection]
+        proj_chain = [last_actual] + [p[1] for p in _yoy_proj]
+        proj_yoy_years = [p[0] for p in _yoy_proj]
         proj_yoy_vals = [
             ((proj_chain[i + 1] - proj_chain[i]) / proj_chain[i] * 100)
             if proj_chain[i] > 0 else 0
-            for i in range(len(projection))
+            for i in range(len(_yoy_proj))
         ]
         proj_yoy_colors = [
             "rgba(22, 163, 74, 0.35)" if v >= 0 else "rgba(220, 38, 38, 0.35)"
