@@ -174,7 +174,7 @@ def load_oes_year(yy: int) -> pd.DataFrame:
     if full_year <= 2017:
         df["soc_version"] = 2010
     elif full_year == 2018:
-        df["soc_version"] = 2018  # transitional but BLS used 2010 codes relabeled
+        df["soc_version"] = 2010  # 2018 OES still uses SOC 2010 codes
     else:
         df["soc_version"] = 2018
 

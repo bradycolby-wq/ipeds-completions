@@ -24,7 +24,7 @@ except ImportError:
 # GitHub Release URL for the database (used on Streamlit Community Cloud)
 _GITHUB_DB_URL = (
     "https://github.com/bradycolby-wq/ipeds-completions/releases/"
-    "download/v1.1/ipeds.db"
+    "download/v1.2/ipeds.db"
 )
 
 
@@ -531,8 +531,10 @@ def run_employment_query(
     """Query OES employment data for occupations related to selected CIP codes.
 
     Handles SOC version differences:
-      - 2015-2017 OES data uses SOC 2010 codes
-      - 2018-2024 OES data uses SOC 2018 codes
+      - 2015-2018 OES data uses SOC 2010 codes
+      - 2019-2024 OES data uses SOC 2018 codes
+      - Some 2019-2020 data uses BLS combined codes (e.g. 15-1256)
+        that are remapped to SOC 2018 detail codes
       - CIP-SOC crosswalk maps CIP -> SOC 2018
       - soc_2010_to_2018 table bridges the gap for older years
 
@@ -588,7 +590,27 @@ def run_employment_query(
         soc_2018_codes,
     ).fetchall()
     soc_2010_codes = [r[0] for r in soc_2010_rows]
-    soc_2010_to_2018_map = {r[0]: r[1] for r in soc_2010_rows}
+    # For many-to-many mappings, prefer the lowest SOC 2018 code
+    # (BLS assigns lower codes to primary occupations, e.g. 15-1252
+    # Software Developers before 15-1253 Software QA)
+    soc_2010_to_2018_map: dict[str, str] = {}
+    for s2010, s2018 in sorted(soc_2010_rows, key=lambda x: x[1]):
+        if s2010 not in soc_2010_to_2018_map:
+            soc_2010_to_2018_map[s2010] = s2018
+
+    # 2a. Handle BLS combined codes (2019-2020)
+    # BLS sometimes publishes combined codes when detail codes can't be
+    # separately disclosed. Include them and remap to detail codes.
+    _COMBINED_SOC = {
+        "15-1256": {"15-1252", "15-1253"},  # Software Devs + QA
+        "15-1257": {"15-1254", "15-1255"},  # Web Devs + Designers
+    }
+    combined_remap = {}  # combined_code -> detail_code to remap to
+    for combined, details in _COMBINED_SOC.items():
+        overlap = details & set(soc_2018_codes)
+        if overlap:
+            combined_remap[combined] = sorted(overlap)[0]
+    all_soc_2018 = list(set(soc_2018_codes) | set(combined_remap.keys()))
 
     # 3. Build area filter
     area_where = ""
@@ -612,10 +634,10 @@ def run_employment_query(
         area_where = f"AND area_type = 4 AND area_code IN ({ph})"
         area_params = bls_codes
 
-    # 4. Query: UNION of SOC 2018 data (2018+) and SOC 2010 data (2015-2017)
-    # For 2018+ data, use SOC 2018 codes directly
-    soc_ph_2018 = ",".join("?" * len(soc_2018_codes))
-    params_2018 = soc_2018_codes + area_params
+    # 4. Query: UNION of SOC 2018 data (2019+) and SOC 2010 data (2015-2018)
+    # For 2019+ data, use SOC 2018 codes (+ any BLS combined codes)
+    soc_ph_2018 = ",".join("?" * len(all_soc_2018))
+    params_2018 = all_soc_2018 + area_params
 
     sql_2018 = f"""
         SELECT year, occ_code, occ_title,
@@ -629,13 +651,13 @@ def run_employment_query(
                          / NULLIF(SUM(CASE WHEN a_median IS NOT NULL THEN tot_emp ELSE 0 END), 0) AS INTEGER)
                     ELSE NULL END AS a_median
         FROM oes_employment
-        WHERE year >= 2018
+        WHERE year >= 2019
           AND occ_code IN ({soc_ph_2018})
           {area_where}
         GROUP BY year, occ_code, occ_title
     """
 
-    # For pre-2018 data, use SOC 2010 codes and map to 2018
+    # For pre-2019 data (2015-2018), use SOC 2010 codes and map to 2018
     dfs = [pd.read_sql_query(sql_2018, conn, params=params_2018)]
 
     if soc_2010_codes:
@@ -654,7 +676,7 @@ def run_employment_query(
                              / NULLIF(SUM(CASE WHEN a_median IS NOT NULL THEN tot_emp ELSE 0 END), 0) AS INTEGER)
                         ELSE NULL END AS a_median
             FROM oes_employment
-            WHERE year < 2018
+            WHERE year < 2019
               AND occ_code IN ({soc_ph_2010})
               {area_where}
             GROUP BY year, occ_code, occ_title
@@ -681,8 +703,23 @@ def run_employment_query(
         return pd.DataFrame()
 
     result = pd.concat(dfs, ignore_index=True)
-    # Update occ_title for remapped codes (use 2018+ titles)
-    title_map = result[result["year"] >= 2018].drop_duplicates("occ_code").set_index("occ_code")["occ_title"].to_dict()
+
+    # Remap BLS combined codes to their detail equivalents
+    if combined_remap:
+        result["occ_code"] = result["occ_code"].map(
+            lambda x: combined_remap.get(x, x)
+        )
+        # Re-aggregate after remapping (combined code may merge with detail code)
+        result = result.groupby(["year", "occ_code"]).agg({
+            "occ_title": "first",
+            "tot_emp": "sum",
+            "a_mean": "first",
+            "a_median": "first",
+        }).reset_index()
+
+    # Update occ_title: use most recent year's title (most accurate post-reclassification)
+    title_source = result.sort_values("year", ascending=False).drop_duplicates("occ_code")
+    title_map = title_source.set_index("occ_code")["occ_title"].to_dict()
     result["occ_title"] = result["occ_code"].map(lambda x: title_map.get(x, x))
 
     return result.sort_values(["occ_code", "year"]).reset_index(drop=True)
