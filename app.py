@@ -1294,47 +1294,51 @@ def main():
             fillcolor="#E5E7EB", opacity=0.3, layer="below", line_width=0,
         )
 
-    # 1. NCES-constrained projection
+    # 1. NCES-constrained projection (gray, circle markers)
     if projection:
         _nces_yrs = [p[0] for p in projection]
         _nces_vals = [p[1] for p in projection]
         _nces_op = 0.3 if blended_projection else 0.45
         _nces_txt_op = 0.4 if blended_projection else 0.6
+        _nces_color = f"rgba(160, 160, 160, {_nces_op})" if blended_projection else f"rgba(242, 104, 34, {_nces_op})"
+        _nces_txt_color = f"rgba(160, 160, 160, {_nces_txt_op})" if blended_projection else f"rgba(242, 104, 34, {_nces_txt_op})"
         fig.add_trace(go.Scatter(
             x=[all_years[-1]] + _nces_yrs,
             y=[last_actual_val] + _nces_vals,
             mode="lines+markers" + ("" if blended_projection else "+text"),
             name="NCES-constrained",
-            line=dict(color=f"rgba(242, 104, 34, {_nces_op})", width=2, dash="dash"),
-            marker=dict(size=6, symbol="diamond", color=f"rgba(242, 104, 34, {_nces_op})"),
+            line=dict(color=_nces_color, width=2, dash="dash"),
+            marker=dict(size=6, symbol="circle", color=_nces_color),
             text=[""] + [f"{v:,}" for v in _nces_vals],
             textposition="top center",
-            textfont=dict(size=9, color=f"rgba(242, 104, 34, {_nces_txt_op})"),
+            textfont=dict(size=9, color=_nces_txt_color),
             hovertemplate="%{y:,.0f} (NCES projection)<extra></extra>",
-            showlegend=True,
+            showlegend=False,
         ))
 
-    # 2. Employment-CAGR projection
+    # 2. Employment-CAGR projection (gray, square markers)
     if emp_projection:
         _emp_yrs = [p[0] for p in emp_projection]
         _emp_vals = [p[1] for p in emp_projection]
         _emp_op = 0.3 if blended_projection else 0.45
         _emp_txt_op = 0.4 if blended_projection else 0.6
+        _emp_color = f"rgba(160, 160, 160, {_emp_op})" if blended_projection else f"rgba(15, 134, 193, {_emp_op})"
+        _emp_txt_color = f"rgba(160, 160, 160, {_emp_txt_op})" if blended_projection else f"rgba(15, 134, 193, {_emp_txt_op})"
         fig.add_trace(go.Scatter(
             x=[all_years[-1]] + _emp_yrs,
             y=[last_actual_val] + _emp_vals,
             mode="lines+markers" + ("" if blended_projection else "+text"),
             name="Employment CAGR",
-            line=dict(color=f"rgba(15, 134, 193, {_emp_op})", width=2, dash="dot"),
-            marker=dict(size=6, symbol="triangle-up", color=f"rgba(15, 134, 193, {_emp_op})"),
+            line=dict(color=_emp_color, width=2, dash="dash"),
+            marker=dict(size=6, symbol="square", color=_emp_color),
             text=[""] + [f"{v:,}" for v in _emp_vals],
             textposition="bottom center",
-            textfont=dict(size=9, color=f"rgba(15, 134, 193, {_emp_txt_op})"),
+            textfont=dict(size=9, color=_emp_txt_color),
             hovertemplate="%{y:,.0f} (employment CAGR projection)<extra></extra>",
-            showlegend=True,
+            showlegend=False,
         ))
 
-    # 3. Blended projection (primary emphasis when available)
+    # 3. Blended projection (bold orange, diamond markers)
     if blended_projection:
         _bl_yrs = [p[0] for p in blended_projection]
         _bl_vals = [p[1] for p in blended_projection]
@@ -1343,13 +1347,13 @@ def main():
             y=[last_actual_val] + _bl_vals,
             mode="lines+markers+text",
             name="Blended",
-            line=dict(color="rgba(101, 163, 59, 0.7)", width=3, dash="dash"),
-            marker=dict(size=8, symbol="circle", color="rgba(101, 163, 59, 0.7)"),
+            line=dict(color="rgba(242, 104, 34, 0.7)", width=3, dash="dash"),
+            marker=dict(size=8, symbol="diamond", color="rgba(242, 104, 34, 0.7)"),
             text=[""] + [f"{v:,}" for v in _bl_vals],
             textposition="top center",
-            textfont=dict(size=10, color="rgba(101, 163, 59, 0.85)"),
+            textfont=dict(size=10, color="rgba(242, 104, 34, 0.85)"),
             hovertemplate="%{y:,.0f} (blended projection)<extra></extra>",
-            showlegend=True,
+            showlegend=False,
         ))
 
     chart_tick_labels = [yr_label(y) for y in chart_years]
@@ -1373,7 +1377,7 @@ def main():
             rangemode="tozero",
         ),
         hovermode="x unified",
-        showlegend=bool(blended_projection),
+        showlegend=False,
         height=520,
         margin=dict(t=90, b=60, l=70, r=20),
         plot_bgcolor="white",
