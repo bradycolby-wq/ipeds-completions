@@ -24,7 +24,7 @@ except ImportError:
 # GitHub Release URL for the database (used on Streamlit Community Cloud)
 _GITHUB_DB_URL = (
     "https://github.com/bradycolby-wq/ipeds-completions/releases/"
-    "download/v1.0/ipeds.db"
+    "download/v1.1/ipeds.db"
 )
 
 
@@ -686,6 +686,102 @@ def run_employment_query(
     result["occ_title"] = result["occ_code"].map(lambda x: title_map.get(x, x))
 
     return result.sort_values(["occ_code", "year"]).reset_index(drop=True)
+
+
+# ── College Scorecard query ──────────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False, ttl=600)
+def run_scorecard_query(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    geo_key: str,
+    geo_values: tuple,
+):
+    """Query College Scorecard graduate outcomes for selected filters.
+
+    Matches CIP codes at 4-digit level (XX.XX) since Scorecard data is
+    reported at that granularity vs IPEDS 6-digit (XX.XXXX).
+    """
+    conn = get_conn()
+    try:
+        conn.execute("SELECT 1 FROM college_scorecard LIMIT 1")
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
+
+    params: list = []
+    where = ["sc.earn_mdn_4yr IS NOT NULL"]
+
+    # ── CIP filter (truncate 6-digit → 4-digit) ──────────────────────────
+    if cip_patterns:
+        sc_cip_set: set[str] = set()
+        like_clauses: list[str] = []
+        for p in cip_patterns:
+            if "%" in p:
+                # Wildcard: "52.%" or "52.01%" → use LIKE
+                like_clauses.append("sc.cipcode LIKE ?")
+                params.append(p[:5] if len(p) > 5 else p)
+            else:
+                # Exact 6-digit: "52.0101" → truncate to "52.01"
+                sc_cip_set.add(p[:5])
+
+        cip_parts: list[str] = list(like_clauses)
+        if sc_cip_set:
+            ph = ",".join("?" * len(sc_cip_set))
+            cip_parts.append(f"sc.cipcode IN ({ph})")
+            params.extend(sorted(sc_cip_set))
+        if cip_parts:
+            where.append(f"({' OR '.join(cip_parts)})")
+
+    # ── Award level filter (pre-mapped in table) ─────────────────────────
+    if awlevels:
+        ph = ",".join("?" * len(awlevels))
+        where.append(f"sc.awlevel IN ({ph})")
+        params.extend(awlevels)
+
+    # ── Geography filter (join institutions for state/metro) ─────────────
+    join_inst = ""
+    if geo_key == "state" and geo_values:
+        join_inst = (
+            "INNER JOIN institutions i "
+            "ON sc.unitid = i.unitid "
+            "AND i.year = (SELECT MAX(year) FROM institutions)"
+        )
+        ph = ",".join("?" * len(geo_values))
+        where.append(f"i.stabbr IN ({ph})")
+        params.extend(geo_values)
+    elif geo_key == "metro" and geo_values:
+        join_inst = (
+            "INNER JOIN institutions i "
+            "ON sc.unitid = i.unitid "
+            "AND i.year = (SELECT MAX(year) FROM institutions)"
+        )
+        ph = ",".join("?" * len(geo_values))
+        where.append(f"i.cbsa IN ({ph})")
+        params.extend(geo_values)
+
+    where_sql = " AND ".join(where)
+
+    sql = f"""
+        SELECT
+            sc.unitid,
+            sc.instnm,
+            sc.cipcode,
+            sc.cipdesc,
+            sc.creddesc,
+            sc.earn_mdn_4yr,
+            sc.debt_all_stgp_eval_mdn,
+            sc.debt_to_earnings,
+            sc.distance
+        FROM college_scorecard sc
+        {join_inst}
+        WHERE {where_sql}
+        ORDER BY sc.debt_to_earnings ASC
+    """
+
+    df = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+    return df
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -1649,6 +1745,138 @@ def main():
             mime="text/csv",
             key="dl_inst",
         )
+
+    # ── Graduate Outcomes (College Scorecard) ────────────────────────────────
+    st.divider()
+    st.subheader("Graduate Outcomes")
+    st.caption(
+        "Median earnings 4 years post-graduation and median debt at completion "
+        "| Source: U.S. Department of Education College Scorecard"
+    )
+
+    _scorecard_ok = False
+    try:
+        _sc_conn = get_conn()
+        _sc_conn.execute("SELECT 1 FROM college_scorecard LIMIT 1")
+        _sc_conn.close()
+        _scorecard_ok = True
+    except Exception:
+        pass
+
+    if not _scorecard_ok:
+        st.info("Scorecard outcomes data not available.")
+    elif all_cips:
+        st.info(
+            "Graduate outcomes data is shown when specific CIP code(s) are selected. "
+            "Deselect **All CIP codes** and choose program(s) to see outcomes."
+        )
+    else:
+        with st.spinner("Querying graduate outcomes..."):
+            df_sc = run_scorecard_query(
+                cip_patterns=cip_patterns,
+                awlevels=selected_awlevels,
+                geo_key=geo_key,
+                geo_values=tuple(geo_values),
+            )
+
+        if df_sc.empty:
+            st.info(
+                "No graduate outcomes data available for these filters. "
+                "Scorecard data is reported at the 4-digit CIP level and may not "
+                "cover all institution / program combinations."
+            )
+        else:
+            # Deduplicate across distance modes (keep highest earnings per combo)
+            df_sc = (
+                df_sc
+                .sort_values("earn_mdn_4yr", ascending=False)
+                .drop_duplicates(subset=["unitid", "cipcode", "creddesc"], keep="first")
+            )
+
+            # ── Metrics row ───────────────────────────────────────────────
+            n_inst = df_sc["unitid"].nunique()
+            med_earn = df_sc["earn_mdn_4yr"].median()
+
+            _sc_debt = df_sc.dropna(subset=["debt_all_stgp_eval_mdn"])
+            med_debt = _sc_debt["debt_all_stgp_eval_mdn"].median() if not _sc_debt.empty else None
+
+            _sc_dte = df_sc.dropna(subset=["debt_to_earnings"])
+            med_dte = _sc_dte["debt_to_earnings"].median() if not _sc_dte.empty else None
+
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric(
+                "Median Earnings (4yr Post-Grad)",
+                f"${med_earn:,.0f}" if med_earn else "N/A",
+            )
+            sc2.metric(
+                "Median Debt at Completion",
+                f"${med_debt:,.0f}" if med_debt else "N/A",
+            )
+            sc3.metric(
+                "Median Debt-to-Earnings",
+                f"{med_dte:.2f}x" if med_dte else "N/A",
+            )
+            sc4.metric("Institutions with Data", f"{n_inst:,}")
+
+            # ── Detail table ──────────────────────────────────────────────
+            sc_display = df_sc.rename(columns={
+                "instnm": "Institution",
+                "cipdesc": "Program",
+                "creddesc": "Credential",
+                "earn_mdn_4yr": "Median Earnings (4yr)",
+                "debt_all_stgp_eval_mdn": "Median Debt",
+                "debt_to_earnings": "Debt/Earnings",
+            })
+            sc_display = sc_display.sort_values(
+                "Debt/Earnings", ascending=True, na_position="last"
+            )
+            sc_display = sc_display[
+                ["Institution", "Program", "Credential",
+                 "Median Earnings (4yr)", "Median Debt", "Debt/Earnings"]
+            ].reset_index(drop=True)
+
+            st.caption(f"{len(sc_display):,} program–institution combinations with earnings data")
+
+            sc_col_cfg = {
+                "Institution": st.column_config.TextColumn("Institution", width=250),
+                "Program": st.column_config.TextColumn("Program", width=200),
+                "Credential": st.column_config.TextColumn("Credential", width=130),
+                "Median Earnings (4yr)": st.column_config.NumberColumn(
+                    "Median Earnings (4yr)", format="$%,.0f", width=155,
+                ),
+                "Median Debt": st.column_config.NumberColumn(
+                    "Median Debt", format="$%,.0f", width=120,
+                ),
+                "Debt/Earnings": st.column_config.NumberColumn(
+                    "Debt/Earnings", format="%.2fx", width=115,
+                ),
+            }
+
+            st.dataframe(
+                sc_display,
+                use_container_width=True,
+                hide_index=True,
+                column_config=sc_col_cfg,
+                height=min(len(sc_display) * 35 + 40, 600),
+            )
+
+            # ── Download CSV ──────────────────────────────────────────────
+            sc_slug = "all_programs" if all_cips else (
+                "_".join(
+                    cip_label_to_code[l] for l in selected_cip_labels
+                ) or "outcomes"
+            )
+            sc_fname = (
+                f"scorecard_{sc_slug}"
+                f"_{geo_label.replace(', ', '_').replace(' ', '_')}.csv"
+            )
+            st.download_button(
+                "Download CSV",
+                data=sc_display.to_csv(index=False),
+                file_name=sc_fname,
+                mime="text/csv",
+                key="dl_scorecard",
+            )
 
     # ── Related Employment by Occupation ─────────────────────────────────────
     st.divider()
