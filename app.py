@@ -290,7 +290,8 @@ def compute_projection(sel_dict, national_dict, selected_awlevels, n_forward=5):
 
     1.  Compute selection's historical *share* of the national total for the
         chosen award levels.
-    2.  Project shares forward with Holt exponential smoothing.
+    2.  Project shares forward using recent-weighted linear trend (last 5 years,
+        recency-weighted) to preserve current momentum.
     3.  Project national totals forward using NCES growth indices (or Holt
         fallback for levels without NCES coverage).
     4.  Result = projected_share × projected_national.
@@ -313,18 +314,18 @@ def compute_projection(sel_dict, national_dict, selected_awlevels, n_forward=5):
         for y in years
     ])
 
-    # ── Project shares ───────────────────────────────────────────────────────
-    try:
-        if shares.std() < 1e-10:
-            proj_shares = np.full(n_forward, shares[-1])
-        else:
-            fit = ExponentialSmoothing(
-                shares, trend="add", initialization_method="estimated",
-            ).fit(optimized=True, use_brute=True)
-            proj_shares = fit.forecast(n_forward)
-    except Exception:
-        # Linear fallback
-        slope = np.polyfit(np.arange(len(shares)), shares, 1)[0]
+    # ── Project shares (recent-weighted linear trend) ──────────────────────
+    # Use the most recent 5 years of share data with recency weighting
+    # so the projection preserves current momentum (both growth and decline)
+    # rather than dampening it like Holt exponential smoothing does.
+    recent_n = min(5, len(shares))
+    recent_shares = shares[-recent_n:]
+    if recent_shares.std() < 1e-10:
+        proj_shares = np.full(n_forward, shares[-1])
+    else:
+        x = np.arange(recent_n)
+        weights = np.linspace(0.5, 1.0, recent_n)  # 2× weight on most recent
+        slope = np.polyfit(x, recent_shares, 1, w=weights)[0]
         proj_shares = shares[-1] + slope * np.arange(1, n_forward + 1)
     proj_shares = np.clip(proj_shares, 0, 1)
 
@@ -353,9 +354,12 @@ def compute_projection(sel_dict, national_dict, selected_awlevels, n_forward=5):
 
 
 def compute_emp_cagr_projection(sel_dict: dict, emp_cagr: float | None, n_forward: int = 5):
-    """Project completions forward using employment projection CAGR.
+    """Project completions using employment CAGR blended with recent momentum.
 
-    Compounds the last historical completions value at the employment CAGR.
+    Blends the BLS employment-projection CAGR with the selection's own recent
+    3-year completions CAGR so the projection incorporates actual field-level
+    momentum.  Near-term years lean toward completions momentum (60 %);
+    later years decay toward the employment rate (70 %).
     Returns list[(year, projected_completions)] or None.
     """
     if emp_cagr is None:
@@ -367,11 +371,25 @@ def compute_emp_cagr_projection(sel_dict: dict, emp_cagr: float | None, n_forwar
     last_val = sel_dict[last_year]
     if last_val <= 0:
         return None
+
+    # Recent 3-year completions CAGR
+    idx_3 = max(0, len(years) - 4)
+    val_3ago = sel_dict[years[idx_3]]
+    n_yrs = last_year - years[idx_3]
+    if val_3ago > 0 and n_yrs > 0:
+        recent_cagr = (last_val / val_3ago) ** (1 / n_yrs) - 1
+    else:
+        recent_cagr = emp_cagr
+
     proj_years = list(range(last_year + 1, last_year + n_forward + 1))
-    return [
-        (y, max(int(round(last_val * (1 + emp_cagr) ** (y - last_year))), 0))
-        for y in proj_years
-    ]
+    result = []
+    for i, y in enumerate(proj_years):
+        # Decay from 60 % recent / 40 % emp → 30 % recent / 70 % emp
+        w = max(0.30, 0.60 - 0.075 * i)
+        rate = w * recent_cagr + (1 - w) * emp_cagr
+        projected = last_val * (1 + rate) ** (i + 1)
+        result.append((y, max(int(round(projected)), 0)))
+    return result
 
 
 def compute_blended_projection(nces_proj, emp_proj, weight_nces: float = 0.5):
@@ -1530,14 +1548,15 @@ def main():
     # Projection methodology note
     if blended_projection:
         st.caption(
-            f"**Projection lines:** NCES-constrained (supply-side, orange) reflects historical share "
-            f"of projected national completions. Employment CAGR (demand-side, blue) grows completions "
-            f"at the BLS-projected employment growth rate ({emp_cagr_for_completions:+.1%}/yr). "
-            f"Blended (green) is the 50/50 average of both."
+            f"**Projection lines:** NCES-constrained (supply-side, orange) extrapolates the recent "
+            f"share trend against projected national completions. Employment CAGR (demand-side, blue) "
+            f"blends BLS-projected employment growth ({emp_cagr_for_completions:+.1%}/yr) with recent "
+            f"completions momentum. Blended (green) is the 50/50 average of both."
         )
     elif projection:
         st.caption(
-            "**Projection:** NCES-constrained model based on historical share of projected national completions."
+            "**Projection:** NCES-constrained model extrapolating recent share trend "
+            "against projected national completions."
         )
 
     # ── YoY change bar chart ───────────────────────────────────────────────────
