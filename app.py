@@ -1692,6 +1692,15 @@ def main():
         mime="text/csv",
     )
 
+    # Footnote listing CIP codes and award levels included
+    if all_cips:
+        _cip_note = "All CIP codes"
+    else:
+        _cip_bullets = "  \n".join(f"- **{l}**" for l in selected_cip_labels)
+        _cip_note = f"**{len(selected_cip_labels)}** CIP code(s):  \n{_cip_bullets}"
+    _level_note = "All award levels" if all_levels else ", ".join(selected_level_labels)
+    st.caption(f"Includes {_cip_note}  \nAward level(s): {_level_note}")
+
     # ── By Institution ────────────────────────────────────────────────────────
     st.divider()
     st.subheader("Completions by Institution")
