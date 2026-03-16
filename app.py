@@ -2242,120 +2242,18 @@ def main():
                     )
                     st.plotly_chart(fig_emp_yoy, use_container_width=True)
 
-                # Occupation detail table
-                occ_pivot = df_emp.pivot_table(
-                    index=["occ_code", "occ_title"],
-                    columns="year",
-                    values="tot_emp",
-                    aggfunc="sum",
-                ).reset_index()
-                occ_pivot.columns.name = None
-
-                # Add latest median wage
-                wage_df = df_emp[df_emp["year"] == latest_emp_year][["occ_code", "a_median"]].drop_duplicates("occ_code")
-                occ_pivot = occ_pivot.merge(wage_df, on="occ_code", how="left")
-
-                emp_yr_cols = sorted([c for c in occ_pivot.columns if isinstance(c, (int, np.integer))])
-
-                # Historical CAGRs for each occupation (3-yr and 10-yr)
-                ey_first = emp_yr_cols[0] if emp_yr_cols else None
-                ey_last = emp_yr_cols[-1] if emp_yr_cols else None
-                ey_3ago = ey_last - 3 if ey_last else None
-                if len(emp_yr_cols) >= 2:
-                    en = ey_last - ey_first
-
-                    def _occ_cagr(row, start_col, n):
-                        fv, lv = row.get(start_col), row.get(ey_last)
-                        if fv and lv and fv > 0 and lv > 0 and n > 0:
-                            return ((lv / fv) ** (1 / n) - 1) * 100
-                        return None
-
-                    if ey_3ago in emp_yr_cols:
-                        occ_pivot["3-yr CAGR"] = occ_pivot.apply(
-                            lambda r: _occ_cagr(r, ey_3ago, 3), axis=1)
-                    occ_pivot["10-yr CAGR"] = occ_pivot.apply(
-                        lambda r: _occ_cagr(r, ey_first, en), axis=1)
-
-                # Projected CAGR from employment_projections table
-                if not df_proj.empty:
-                    proj_cagr_df = df_proj[["occ_code", "cagr"]].copy()
-                    proj_cagr_df = proj_cagr_df.rename(columns={"cagr": "Proj. CAGR"})
-                    proj_cagr_df["Proj. CAGR"] = proj_cagr_df["Proj. CAGR"] * 100  # to percent
-                    occ_pivot = occ_pivot.merge(proj_cagr_df, on="occ_code", how="left")
-
-                # Sort by latest year employment
-                if emp_yr_cols:
-                    occ_pivot = occ_pivot.sort_values(emp_yr_cols[-1], ascending=False, na_position="last")
-
-                # Format columns
-                occ_pivot = occ_pivot.rename(columns={
-                    "occ_title": "Occupation",
-                    "a_median": f"Median Wage ({latest_emp_year})",
-                })
-                occ_pivot = occ_pivot.drop(columns=["occ_code"])
-
-                wage_label = f"Median Wage ({latest_emp_year})"
-                display_cols = ["Occupation"]
-                if wage_label in occ_pivot.columns:
-                    display_cols.append(wage_label)
-                display_cols += emp_yr_cols
-                for _cagr_col in ["3-yr CAGR", "10-yr CAGR", "Proj. CAGR"]:
-                    if _cagr_col in occ_pivot.columns:
-                        display_cols.append(_cagr_col)
-
-                occ_pivot = occ_pivot[[c for c in display_cols if c in occ_pivot.columns]]
-
-                # Format year columns as comma-separated strings for display
-                for _yc in emp_yr_cols:
-                    occ_pivot[_yc] = occ_pivot[_yc].apply(
-                        lambda v: f"{int(v):,}" if pd.notna(v) else ""
-                    )
-
-                # Format wage column
-                wage_col = f"Median Wage ({latest_emp_year})"
-                if wage_col in occ_pivot.columns:
-                    occ_pivot[wage_col] = occ_pivot[wage_col].apply(
-                        lambda v: f"${int(v):,}" if pd.notna(v) else ""
-                    )
-
-                st.caption(f"{len(occ_pivot):,} related occupations (SOC codes mapped via CIP-SOC crosswalk)")
-
-                emp_col_cfg = {
-                    "Occupation": st.column_config.TextColumn("Occupation", width=280),
-                }
-                for y in emp_yr_cols:
-                    emp_col_cfg[y] = st.column_config.TextColumn(str(y), width=82)
-                if "3-yr CAGR" in occ_pivot.columns:
-                    emp_col_cfg["3-yr CAGR"] = st.column_config.NumberColumn(
-                        f"3-yr CAGR ({ey_3ago} → {ey_last})",
-                        format="%.1f%%", width=90,
-                    )
-                if "10-yr CAGR" in occ_pivot.columns:
-                    emp_col_cfg["10-yr CAGR"] = st.column_config.NumberColumn(
-                        f"10-yr CAGR ({ey_first} → {ey_last})",
-                        format="%.1f%%", width=90,
-                    )
-                if "Proj. CAGR" in occ_pivot.columns:
-                    emp_col_cfg["Proj. CAGR"] = st.column_config.NumberColumn(
-                        "Proj. CAGR",
-                        format="%.1f%%", width=90,
-                    )
-
-                st.dataframe(
-                    occ_pivot,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config=emp_col_cfg,
+                # Footnote listing the occupations included in the aggregate
+                occ_list = (
+                    df_emp[["occ_code", "occ_title"]]
+                    .drop_duplicates("occ_code")
+                    .sort_values("occ_code")
                 )
-
-                # Download CSV
-                emp_fname = f"employment_{cip_slug}_{geo_label.replace(', ', '_').replace(' ', '_')}.csv"
-                st.download_button(
-                    "⬇️ Download CSV",
-                    data=occ_pivot.to_csv(index=False),
-                    file_name=emp_fname,
-                    mime="text/csv",
-                    key="dl_emp",
+                occ_bullets = "  \n".join(
+                    f"- **{row.occ_code}** {row.occ_title}" for row in occ_list.itertuples()
+                )
+                st.caption(
+                    f"Aggregate includes **{len(occ_list)}** related occupations "
+                    f"(SOC codes mapped via CIP-SOC crosswalk):  \n{occ_bullets}"
                 )
 
 
