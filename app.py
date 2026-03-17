@@ -802,22 +802,21 @@ def run_scorecard_query(
         params.extend(awlevels)
 
     # ── Geography filter (join institutions for state/metro) ─────────────
-    join_inst = ""
+    # Always join institutions to exclude territories (PR, VI, GU, etc.)
+    join_inst = (
+        "INNER JOIN institutions i "
+        "ON sc.unitid = i.unitid "
+        "AND i.year = (SELECT MAX(year) FROM institutions)"
+    )
+    territory_ph = ",".join("?" * len(EXCLUDED_TERRITORIES))
+    where.append(f"i.stabbr NOT IN ({territory_ph})")
+    params.extend(sorted(EXCLUDED_TERRITORIES))
+
     if geo_key == "state" and geo_values:
-        join_inst = (
-            "INNER JOIN institutions i "
-            "ON sc.unitid = i.unitid "
-            "AND i.year = (SELECT MAX(year) FROM institutions)"
-        )
         ph = ",".join("?" * len(geo_values))
         where.append(f"i.stabbr IN ({ph})")
         params.extend(geo_values)
     elif geo_key == "metro" and geo_values:
-        join_inst = (
-            "INNER JOIN institutions i "
-            "ON sc.unitid = i.unitid "
-            "AND i.year = (SELECT MAX(year) FROM institutions)"
-        )
         ph = ",".join("?" * len(geo_values))
         where.append(f"i.cbsa IN ({ph})")
         params.extend(geo_values)
