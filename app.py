@@ -451,6 +451,100 @@ def apply_capacity_adjustment(projection, program_counts: dict):
     return adjusted, cap_cagr
 
 
+def compute_unified_projection(
+    sel_dict: dict,
+    emp_cagr: float | None,
+    program_counts: dict | None,
+    n_forward: int = 5,
+):
+    """Single unified projection blending trend regression, employment growth,
+    and program capacity.
+
+    Components (weighted):
+      1. Recent-weighted linear regression of completions (base trend)
+      2. Employment CAGR from BLS projections (demand signal)
+      3. Program count CAGR (capacity signal)
+
+    Returns (list[(year, value)], dict with component info) or (None, {}).
+    """
+    years = sorted(sel_dict.keys())
+    if len(years) < 3:
+        return None, {}
+
+    last_year = years[-1]
+    last_val = sel_dict[last_year]
+    if last_val <= 0:
+        return None, {}
+
+    proj_years = list(range(last_year + 1, last_year + n_forward + 1))
+
+    # ── Component 1: Recent-weighted linear regression CAGR ───────────────
+    recent_n = min(5, len(years))
+    recent_years = years[-recent_n:]
+    recent_vals = np.array([sel_dict[y] for y in recent_years], dtype=float)
+    x = np.arange(recent_n)
+    weights = np.linspace(0.5, 1.0, recent_n)
+    slope = np.polyfit(x, recent_vals, 1, w=weights)[0]
+    # Convert slope to an approximate CAGR
+    mid_val = recent_vals.mean()
+    trend_cagr = slope / mid_val if mid_val > 0 else 0.0
+
+    # ── Component 2: Employment CAGR ──────────────────────────────────────
+    has_emp = emp_cagr is not None
+
+    # ── Component 3: Program capacity CAGR ────────────────────────────────
+    cap_cagr = None
+    if program_counts and len(program_counts) >= 4:
+        pc_years = sorted(program_counts.keys())
+        pc_last = program_counts[pc_years[-1]]
+        yr3 = pc_years[-1] - 3
+        pc_3ago = program_counts.get(yr3)
+        if pc_3ago and pc_3ago > 0 and pc_last > 0:
+            cap_cagr = (pc_last / pc_3ago) ** (1 / 3) - 1
+
+    # ── Blend into a single growth rate ───────────────────────────────────
+    # Assign weights based on what's available:
+    #   - trend always gets weight
+    #   - employment gets weight if available
+    #   - capacity gets weight if available and meaningful
+    components = {"trend": trend_cagr}
+    w_trend = 0.50
+    w_emp = 0.0
+    w_cap = 0.0
+
+    if has_emp and cap_cagr is not None and abs(cap_cagr) >= 0.005:
+        # All three available
+        w_trend = 0.40
+        w_emp = 0.35
+        w_cap = 0.25
+        components["employment"] = emp_cagr
+        components["capacity"] = cap_cagr
+    elif has_emp:
+        # Trend + employment
+        w_trend = 0.55
+        w_emp = 0.45
+        components["employment"] = emp_cagr
+    elif cap_cagr is not None and abs(cap_cagr) >= 0.005:
+        # Trend + capacity
+        w_trend = 0.65
+        w_cap = 0.35
+        components["capacity"] = cap_cagr
+
+    blended_rate = w_trend * trend_cagr + w_emp * (emp_cagr or 0) + w_cap * (cap_cagr or 0)
+    components["blended_rate"] = blended_rate
+    components["weights"] = {
+        k: v for k, v in [("trend", w_trend), ("employment", w_emp), ("capacity", w_cap)] if v > 0
+    }
+
+    # ── Project forward ───────────────────────────────────────────────────
+    result = []
+    for i, y in enumerate(proj_years):
+        projected = last_val * (1 + blended_rate) ** (i + 1)
+        result.append((y, max(int(round(projected)), 0)))
+
+    return result, components
+
+
 @st.cache_data(show_spinner=False, ttl=600)
 def run_institution_query(
     cip_patterns: tuple,
@@ -1569,43 +1663,28 @@ def main():
     all_years = sorted(df["year"].unique())
     year_tick_labels = [yr_label(y) for y in all_years]
 
-    # ── Compute projection (needed by metrics + chart) ──────────────────────
+    # ── Compute unified projection ───────────────────────────────────────────
     df_totals = df.groupby("year")["completions"].sum()
     sel_dict = df_totals.to_dict()
-    national_dict = run_national_totals(selected_awlevels)
-    projection = compute_projection(sel_dict, national_dict, selected_awlevels)
 
-    # ── Employment-informed projection ────────────────────────────────────────
+    # Get employment CAGR if specific CIPs selected
     emp_cagr_for_completions = None
-    emp_projection = None
-    blended_projection = None
-
-    if not all_cips:  # Employment mapping only meaningful for specific CIPs
+    if not all_cips:
         emp_cagr_for_completions = get_emp_proj_cagr(
             cip_patterns=cip_patterns,
             awlevels=selected_awlevels,
             geo_key=geo_key,
             geo_values=tuple(geo_values),
         )
-        if emp_cagr_for_completions is not None:
-            emp_projection = compute_emp_cagr_projection(sel_dict, emp_cagr_for_completions)
-            blended_projection = compute_blended_projection(projection, emp_projection)
 
-    # ── Capacity adjustment (program count trend) ──────────────────────────
-    capacity_cagr = None
-    if program_counts:
-        if projection:
-            projection, capacity_cagr = apply_capacity_adjustment(
-                projection, program_counts
-            )
-        if emp_projection:
-            emp_projection, _ = apply_capacity_adjustment(
-                emp_projection, program_counts
-            )
-        if blended_projection:
-            blended_projection, _ = apply_capacity_adjustment(
-                blended_projection, program_counts
-            )
+    projection, proj_components = compute_unified_projection(
+        sel_dict,
+        emp_cagr=emp_cagr_for_completions,
+        program_counts=program_counts,
+    )
+
+    # Extract capacity CAGR for the projected program count bars
+    capacity_cagr = proj_components.get("capacity")
 
     # ── Summary metrics ───────────────────────────────────────────────────────
     agg = df_totals
@@ -1622,16 +1701,13 @@ def main():
     val_3ago = int(agg[yr_3ago]) if yr_3ago in agg.index else None
     cagr_3 = (last_val / val_3ago) ** (1 / 3) - 1 if val_3ago else None
 
-    # Projected CAGR — use blended if available, else NCES-only
-    _display_proj = blended_projection or projection
-    if _display_proj and last_val > 0:
-        proj_last_yr, proj_last_val = _display_proj[-1]
+    # Projected CAGR
+    if projection and last_val > 0:
+        proj_last_yr, proj_last_val = projection[-1]
         n_proj = proj_last_yr - last_yr
         cagr_proj = (proj_last_val / last_val) ** (1 / n_proj) - 1 if n_proj > 0 else None
     else:
         proj_last_yr, cagr_proj = last_yr + 5, None
-
-    _proj_label = "Blended" if blended_projection else "NCES"
 
     # Institution count
     n_inst = df_inst["unitid"].nunique()
@@ -1647,7 +1723,7 @@ def main():
         f"{cagr_3:+.1%}" if cagr_3 is not None else "N/A",
     )
     m4.metric(
-        f"Proj. CAGR [{_proj_label}] ({yr_label(last_yr)} → {yr_label(proj_last_yr)})",
+        f"Proj. CAGR ({yr_label(last_yr)} → {yr_label(proj_last_yr)})",
         f"{cagr_proj:+.1%}" if cagr_proj is not None else "N/A",
     )
     m5.metric("Reporting Institutions", f"{n_inst:,}")
@@ -1722,14 +1798,13 @@ def main():
             secondary_y=False,
         )
 
-    # ── Projection lines (up to 3: NCES, Employment CAGR, Blended) ──────────
+    # ── Projection (single unified line) ─────────────────────────────────────
     chart_years = list(all_years)
-    _has_any_proj = projection or blended_projection
-    last_actual_val = int(df_totals[all_years[-1]]) if _has_any_proj else 0
+    last_actual_val = int(df_totals[all_years[-1]]) if projection else 0
 
-    if _has_any_proj:
-        _ref_proj = projection or blended_projection
-        proj_years_list = [p[0] for p in _ref_proj]
+    if projection:
+        proj_years_list = [p[0] for p in projection]
+        proj_vals = [p[1] for p in projection]
         chart_years = list(all_years) + proj_years_list
 
         # Gray shaded projection region
@@ -1764,72 +1839,19 @@ def main():
                 secondary_y=True,
             )
 
-    # 1. NCES-constrained projection (gray, circle markers)
-    if projection:
-        _nces_yrs = [p[0] for p in projection]
-        _nces_vals = [p[1] for p in projection]
-        _nces_op = 0.3 if blended_projection else 0.45
-        _nces_txt_op = 0.4 if blended_projection else 0.6
-        _nces_color = f"rgba(160, 160, 160, {_nces_op})" if blended_projection else f"rgba(242, 104, 34, {_nces_op})"
-        _nces_txt_color = f"rgba(160, 160, 160, {_nces_txt_op})" if blended_projection else f"rgba(242, 104, 34, {_nces_txt_op})"
+        # Single projection line
         fig.add_trace(
             go.Scatter(
-                x=[all_years[-1]] + _nces_yrs,
-                y=[last_actual_val] + _nces_vals,
-                mode="lines+markers" + ("" if blended_projection else "+text"),
-                name="NCES-constrained",
-                line=dict(color=_nces_color, width=2, dash="dash"),
-                marker=dict(size=6, symbol="circle", color=_nces_color),
-                text=[""] + [f"{v:,}" for v in _nces_vals],
-                textposition="top center",
-                textfont=dict(size=9, color=_nces_txt_color),
-                hovertemplate="%{y:,.0f} (NCES projection)<extra></extra>",
-                showlegend=False,
-            ),
-            secondary_y=False,
-        )
-
-    # 2. Employment-CAGR projection (gray, square markers)
-    if emp_projection:
-        _emp_yrs = [p[0] for p in emp_projection]
-        _emp_vals = [p[1] for p in emp_projection]
-        _emp_op = 0.3 if blended_projection else 0.45
-        _emp_txt_op = 0.4 if blended_projection else 0.6
-        _emp_color = f"rgba(160, 160, 160, {_emp_op})" if blended_projection else f"rgba(15, 134, 193, {_emp_op})"
-        _emp_txt_color = f"rgba(160, 160, 160, {_emp_txt_op})" if blended_projection else f"rgba(15, 134, 193, {_emp_txt_op})"
-        fig.add_trace(
-            go.Scatter(
-                x=[all_years[-1]] + _emp_yrs,
-                y=[last_actual_val] + _emp_vals,
-                mode="lines+markers" + ("" if blended_projection else "+text"),
-                name="Employment CAGR",
-                line=dict(color=_emp_color, width=2, dash="dash"),
-                marker=dict(size=6, symbol="square", color=_emp_color),
-                text=[""] + [f"{v:,}" for v in _emp_vals],
-                textposition="bottom center",
-                textfont=dict(size=9, color=_emp_txt_color),
-                hovertemplate="%{y:,.0f} (employment CAGR projection)<extra></extra>",
-                showlegend=False,
-            ),
-            secondary_y=False,
-        )
-
-    # 3. Blended projection (bold orange, diamond markers)
-    if blended_projection:
-        _bl_yrs = [p[0] for p in blended_projection]
-        _bl_vals = [p[1] for p in blended_projection]
-        fig.add_trace(
-            go.Scatter(
-                x=[all_years[-1]] + _bl_yrs,
-                y=[last_actual_val] + _bl_vals,
+                x=[all_years[-1]] + proj_years_list,
+                y=[last_actual_val] + proj_vals,
                 mode="lines+markers+text",
-                name="Blended",
-                line=dict(color="rgba(242, 104, 34, 0.7)", width=3, dash="dash"),
-                marker=dict(size=8, symbol="diamond", color="rgba(242, 104, 34, 0.7)"),
-                text=[""] + [f"{v:,}" for v in _bl_vals],
+                name="Projection",
+                line=dict(color="rgba(242, 104, 34, 0.6)", width=3, dash="dash"),
+                marker=dict(size=7, symbol="diamond", color="rgba(242, 104, 34, 0.6)"),
+                text=[""] + [f"{v:,}" for v in proj_vals],
                 textposition="top center",
-                textfont=dict(size=10, color="rgba(242, 104, 34, 0.85)"),
-                hovertemplate="%{y:,.0f} (blended projection)<extra></extra>",
+                textfont=dict(size=10, color="rgba(242, 104, 34, 0.75)"),
+                hovertemplate="%{y:,.0f} (projected)<extra></extra>",
                 showlegend=False,
             ),
             secondary_y=False,
@@ -1849,11 +1871,7 @@ def main():
             gridwidth=1,
         ),
         hovermode="x unified",
-        showlegend=True,
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
-            xanchor="left", x=0, font=dict(size=11),
-        ),
+        showlegend=False,
         height=540,
         margin=dict(t=100, b=60, l=70, r=70),
         plot_bgcolor="white",
@@ -1883,25 +1901,24 @@ def main():
     st.plotly_chart(fig, use_container_width=True)
 
     # Projection methodology note
-    _cap_note = ""
-    if capacity_cagr is not None and abs(capacity_cagr) >= 0.005:
-        _cap_note = (
-            f" Adjusted for program capacity trend ({capacity_cagr:+.1%}/yr): "
-            f"{'expanding' if capacity_cagr > 0 else 'contracting'} number of "
-            f"programs offering this credential."
-        )
-
-    if blended_projection:
+    if projection and proj_components:
+        _parts = []
+        _w = proj_components.get("weights", {})
+        if "trend" in _w:
+            _parts.append(f"completions trend ({_w['trend']:.0%})")
+        if "employment" in _w:
+            _parts.append(
+                f"BLS employment growth {emp_cagr_for_completions:+.1%}/yr ({_w['employment']:.0%})"
+            )
+        if "capacity" in _w:
+            _cap = proj_components["capacity"]
+            _parts.append(
+                f"program capacity {_cap:+.1%}/yr ({_w['capacity']:.0%})"
+            )
+        _blend_rate = proj_components.get("blended_rate")
+        _rate_str = f" Blended rate: {_blend_rate:+.1%}/yr." if _blend_rate is not None else ""
         st.caption(
-            f"**Projection lines:** NCES-constrained (supply-side) extrapolates the recent "
-            f"share trend against projected national completions. Employment CAGR (demand-side) "
-            f"blends BLS-projected employment growth ({emp_cagr_for_completions:+.1%}/yr) with recent "
-            f"completions momentum. Blended is the 50/50 average of both.{_cap_note}"
-        )
-    elif projection:
-        st.caption(
-            "**Projection:** NCES-constrained model extrapolating recent share trend "
-            f"against projected national completions.{_cap_note}"
+            f"**Projection** blends {', '.join(_parts)}.{_rate_str}"
         )
 
     # ── YoY change bar chart ───────────────────────────────────────────────────
@@ -1924,8 +1941,8 @@ def main():
         showlegend=False,
     ))
 
-    # Projected YoY bars (semi-transparent) – use blended when available
-    _yoy_proj = blended_projection or projection
+    # Projected YoY bars (semi-transparent)
+    _yoy_proj = projection
     if _yoy_proj:
         last_actual = int(df_totals[all_years[-1]])
         proj_chain = [last_actual] + [p[1] for p in _yoy_proj]
