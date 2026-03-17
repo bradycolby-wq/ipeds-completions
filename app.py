@@ -803,10 +803,15 @@ def run_scorecard_query(
 
     # ── Geography filter (join institutions for state/metro) ─────────────
     # Always join institutions to exclude territories (PR, VI, GU, etc.)
+    # Use each institution's most recent IPEDS year so closed/merged schools
+    # still match rather than requiring all to exist in the global max year.
     join_inst = (
+        "INNER JOIN ("
+        "  SELECT unitid, MAX(year) AS max_year"
+        "  FROM institutions GROUP BY unitid"
+        ") imax ON sc.unitid = imax.unitid "
         "INNER JOIN institutions i "
-        "ON sc.unitid = i.unitid "
-        "AND i.year = (SELECT MAX(year) FROM institutions)"
+        "ON i.unitid = imax.unitid AND i.year = imax.max_year"
     )
     territory_ph = ",".join("?" * len(EXCLUDED_TERRITORIES))
     where.append(f"i.stabbr NOT IN ({territory_ph})")
