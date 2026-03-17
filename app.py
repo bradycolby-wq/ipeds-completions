@@ -1047,7 +1047,7 @@ def run_google_trends_query(
       - 'geo_interest': float or None — interest index for selected geography
       - 'search_terms': list[str] — search terms used
       - 'state_data': DataFrame(state_abbr, interest) — all states
-      - 'top_dmas': DataFrame(dma_name, interest) — top 15 DMAs by interest
+      - 'top_metros': DataFrame(cbsa_code, cbsa_name, interest) — top 15 metros
       - 'per_cip_time': DataFrame(date, cipcode, search_term, interest) — per-CIP
     Or None if no data is available.
     """
@@ -1133,16 +1133,21 @@ def run_google_trends_query(
     """
     df_states = pd.read_sql_query(state_sql, conn, params=cip_params)
 
-    # 5. Top DMA markets (top 15 by interest, for bar chart)
-    dma_sql = f"""
-        SELECT dma_name, AVG(interest) AS interest
-        FROM google_trends_dma
-        WHERE ({cip_where}) AND interest > 0
-        GROUP BY dma_code
-        ORDER BY interest DESC
-        LIMIT 15
-    """
-    df_dmas = pd.read_sql_query(dma_sql, conn, params=cip_params)
+    # 5. Top metro markets (DMA interest weighted into CBSAs, top 15)
+    try:
+        metro_sql = f"""
+            SELECT w.cbsa_code, w.cbsa_name,
+                   SUM(gt.interest * w.weight) / SUM(w.weight) AS interest
+            FROM google_trends_dma gt
+            JOIN dma_cbsa_weights w ON gt.dma_code = w.dma_code
+            WHERE ({cip_where}) AND gt.interest > 0
+            GROUP BY w.cbsa_code
+            ORDER BY interest DESC
+            LIMIT 15
+        """
+        df_metros = pd.read_sql_query(metro_sql, conn, params=cip_params)
+    except Exception:
+        df_metros = pd.DataFrame(columns=["cbsa_code", "cbsa_name", "interest"])
 
     # 6. Per-CIP time series (for multi-program comparison)
     per_cip_sql = f"""
@@ -1168,7 +1173,7 @@ def run_google_trends_query(
         "geo_interest": round(geo_interest, 1) if geo_interest is not None else None,
         "search_terms": terms,
         "state_data": df_states,
-        "top_dmas": df_dmas,
+        "top_metros": df_metros,
         "per_cip_time": df_per_cip,
     }
 
@@ -2252,15 +2257,15 @@ def main():
             )
             st.plotly_chart(fig_trend, use_container_width=True)
 
-            # ── Chart 2 & 3: State Map + Top Markets (side by side) ───
+            # ── Chart 2 & 3: State Map + Top Metro Markets (side by side)
             df_states = trends_data["state_data"]
-            df_dmas = trends_data["top_dmas"]
+            df_metros = trends_data["top_metros"]
 
             _has_state_chart = not df_states.empty
-            _has_dma_chart = not df_dmas.empty and len(df_dmas) > 0
+            _has_metro_chart = not df_metros.empty and len(df_metros) > 0
 
-            if _has_state_chart or _has_dma_chart:
-                if _has_state_chart and _has_dma_chart:
+            if _has_state_chart or _has_metro_chart:
+                if _has_state_chart and _has_metro_chart:
                     col_map, col_bar = st.columns([3, 2])
                 elif _has_state_chart:
                     col_map = st.container()
@@ -2318,15 +2323,15 @@ def main():
                             fig_map, use_container_width=True
                         )
 
-                # ── Top DMA Markets bar chart ─────────────────────────
-                if _has_dma_chart:
+                # ── Top Metro Markets bar chart ───────────────────────
+                if _has_metro_chart:
                     with col_bar:
                         # Reverse for horizontal bar (highest at top)
-                        df_bar = df_dmas.sort_values(
+                        df_bar = df_metros.sort_values(
                             "interest", ascending=True
                         ).tail(15)
-                        # Truncate long DMA names
-                        df_bar["label"] = df_bar["dma_name"].apply(
+                        # Truncate long CBSA names for display
+                        df_bar["label"] = df_bar["cbsa_name"].apply(
                             lambda n: (n[:28] + "...") if len(n) > 30 else n
                         )
                         fig_bar = go.Figure(go.Bar(
@@ -2349,7 +2354,7 @@ def main():
                         ))
                         fig_bar.update_layout(
                             title=dict(
-                                text="<b>Top Markets (DMA)</b>",
+                                text="<b>Top Metro Markets</b>",
                                 font=dict(size=14), x=0, xanchor="left",
                             ),
                             xaxis=dict(
