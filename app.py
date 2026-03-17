@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 try:
@@ -411,6 +412,45 @@ def compute_blended_projection(nces_proj, emp_proj, weight_nces: float = 0.5):
     ]
 
 
+def apply_capacity_adjustment(projection, program_counts: dict):
+    """Adjust projection values by the trend in number of programs offered.
+
+    Computes the 3-year CAGR of program counts and applies it as a
+    multiplicative capacity factor: if programs are growing, projections
+    are nudged up; if programs are shrinking, projections are nudged down.
+
+    Returns (adjusted_projection, capacity_cagr) or (projection, None) if
+    insufficient data.
+    """
+    if not projection or not program_counts:
+        return projection, None
+
+    years = sorted(program_counts.keys())
+    if len(years) < 4:
+        return projection, None
+
+    last_year = years[-1]
+    last_count = program_counts[last_year]
+    yr_3ago = last_year - 3
+    count_3ago = program_counts.get(yr_3ago)
+
+    if not count_3ago or count_3ago <= 0 or last_count <= 0:
+        return projection, None
+
+    cap_cagr = (last_count / count_3ago) ** (1 / 3) - 1
+
+    # Only adjust if the change is meaningful (>0.5%/yr abs)
+    if abs(cap_cagr) < 0.005:
+        return projection, cap_cagr
+
+    adjusted = []
+    for y, val in projection:
+        n = y - last_year
+        factor = (1 + cap_cagr) ** n
+        adjusted.append((y, max(int(round(val * factor)), 0)))
+    return adjusted, cap_cagr
+
+
 @st.cache_data(show_spinner=False, ttl=600)
 def run_institution_query(
     cip_patterns: tuple,
@@ -537,6 +577,64 @@ def run_query(
     df = pd.read_sql_query(sql, conn, params=params)
     conn.close()
     return df
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def run_program_count_query(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    geo_key: str,
+    geo_values: tuple,
+):
+    """Count distinct programs (institutions) reporting ≥1 completion per year.
+
+    A 'program' = unique unitid offering the selected CIP/award-level with
+    at least one completion. Returns dict {year: program_count}.
+    """
+    cip_patterns = expand_cip_patterns(cip_patterns)
+
+    conn = get_conn()
+    params = []
+    where = [
+        "majornum = 1",
+        "ctotalt IS NOT NULL",
+        "ctotalt > 0",
+    ]
+
+    if cip_patterns:
+        cip_clauses = []
+        for p in cip_patterns:
+            cip_clauses.append("cipcode LIKE ?" if "%" in p else "cipcode = ?")
+            params.append(p)
+        where.append(f"({' OR '.join(cip_clauses)})")
+
+    if awlevels:
+        placeholders = ",".join("?" * len(awlevels))
+        where.append(f"awlevel IN ({placeholders})")
+        params.extend(awlevels)
+
+    if geo_key == "state" and geo_values:
+        placeholders = ",".join("?" * len(geo_values))
+        where.append(f"stabbr IN ({placeholders})")
+        params.extend(geo_values)
+    elif geo_key == "metro" and geo_values:
+        placeholders = ",".join("?" * len(geo_values))
+        where.append(f"cbsa IN ({placeholders})")
+        params.extend(geo_values)
+
+    where_sql = "WHERE " + " AND ".join(where)
+
+    sql = f"""
+        SELECT year, COUNT(DISTINCT unitid) AS program_count
+        FROM completions_view
+        {where_sql}
+        GROUP BY year
+        ORDER BY year
+    """
+
+    df = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+    return dict(zip(df["year"], df["program_count"]))
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -1419,6 +1517,12 @@ def main():
             geo_key=geo_key,
             geo_values=tuple(geo_values),
         )
+        program_counts = run_program_count_query(
+            cip_patterns=cip_patterns,
+            awlevels=selected_awlevels,
+            geo_key=geo_key,
+            geo_values=tuple(geo_values),
+        )
 
     if df.empty:
         st.warning(
@@ -1487,6 +1591,22 @@ def main():
             emp_projection = compute_emp_cagr_projection(sel_dict, emp_cagr_for_completions)
             blended_projection = compute_blended_projection(projection, emp_projection)
 
+    # ── Capacity adjustment (program count trend) ──────────────────────────
+    capacity_cagr = None
+    if program_counts:
+        if projection:
+            projection, capacity_cagr = apply_capacity_adjustment(
+                projection, program_counts
+            )
+        if emp_projection:
+            emp_projection, _ = apply_capacity_adjustment(
+                emp_projection, program_counts
+            )
+        if blended_projection:
+            blended_projection, _ = apply_capacity_adjustment(
+                blended_projection, program_counts
+            )
+
     # ── Summary metrics ───────────────────────────────────────────────────────
     agg = df_totals
     first_yr, last_yr = agg.index.min(), agg.index.max()
@@ -1534,57 +1654,72 @@ def main():
 
     st.divider()
 
-    # ── Chart ─────────────────────────────────────────────────────────────────
+    # ── Chart (dual-axis: completions line + programs offered bars) ──────────
     chart_title = (
         f"<b>{cip_display}</b>"
         f"<br><sup style='color:#999999'>{level_str} · {geo_label}</sup>"
     )
 
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # ── Programs Offered bars (secondary y-axis, behind everything) ───────
+    _pc_years = sorted(program_counts.keys())
+    _pc_vals = [program_counts[y] for y in _pc_years]
+    if _pc_years:
+        fig.add_trace(
+            go.Bar(
+                x=_pc_years,
+                y=_pc_vals,
+                name="Programs Offered",
+                marker=dict(color="rgba(15, 134, 193, 0.18)"),
+                hovertemplate="%{y:,} programs<extra></extra>",
+                showlegend=True,
+            ),
+            secondary_y=True,
+        )
+
+    # ── Completions line(s) (primary y-axis) ──────────────────────────────
     if "award_level_name" in df.columns:
-        fig = px.line(
-            df,
-            x="year",
-            y="completions",
-            color="award_level_name",
-            text="completions",
-            markers=True,
-            title=chart_title,
-            labels={
-                "year": "",
-                "completions": "Total Completions",
-                "award_level_name": "Award Level",
-            },
-            color_discrete_sequence=CHART_COLORS,
-        )
-        fig.update_traces(
-            mode="lines+markers+text",
-            textposition="top center",
-            texttemplate="%{y:,.0f}",
-            textfont=dict(size=11),
-            hovertemplate="<b>%{fullData.name}</b><br>%{y:,.0f} completions<extra></extra>",
-            line=dict(width=2.5),
-            marker=dict(size=8),
-        )
+        for idx, (level_name, grp) in enumerate(
+            df.groupby("award_level_name", sort=False)
+        ):
+            _color = CHART_COLORS[idx % len(CHART_COLORS)]
+            fig.add_trace(
+                go.Scatter(
+                    x=grp["year"],
+                    y=grp["completions"],
+                    mode="lines+markers+text",
+                    name=level_name,
+                    line=dict(width=2.5, color=_color),
+                    marker=dict(size=8, color=_color),
+                    text=[f"{v:,}" for v in grp["completions"]],
+                    textposition="top center",
+                    textfont=dict(size=11),
+                    hovertemplate=(
+                        f"<b>{level_name}</b><br>"
+                        "%{y:,.0f} completions<extra></extra>"
+                    ),
+                    showlegend=True,
+                ),
+                secondary_y=False,
+            )
     else:
         df_agg = df.groupby("year")["completions"].sum().reset_index()
-        fig = px.line(
-            df_agg,
-            x="year",
-            y="completions",
-            text="completions",
-            markers=True,
-            title=chart_title,
-            labels={"year": "", "completions": "Total Completions"},
-            color_discrete_sequence=["#f26822"],
-        )
-        fig.update_traces(
-            mode="lines+markers+text",
-            textposition="top center",
-            texttemplate="%{y:,.0f}",
-            textfont=dict(size=11),
-            hovertemplate="%{y:,.0f} completions<extra></extra>",
-            line=dict(width=2.5),
-            marker=dict(size=9),
+        fig.add_trace(
+            go.Scatter(
+                x=df_agg["year"],
+                y=df_agg["completions"],
+                mode="lines+markers+text",
+                name="Completions",
+                line=dict(width=2.5, color="#f26822"),
+                marker=dict(size=9, color="#f26822"),
+                text=[f"{v:,}" for v in df_agg["completions"]],
+                textposition="top center",
+                textfont=dict(size=11),
+                hovertemplate="%{y:,.0f} completions<extra></extra>",
+                showlegend=True,
+            ),
+            secondary_y=False,
         )
 
     # ── Projection lines (up to 3: NCES, Employment CAGR, Blended) ──────────
@@ -1604,6 +1739,31 @@ def main():
             fillcolor="#E5E7EB", opacity=0.3, layer="below", line_width=0,
         )
 
+        # Projected program count bars (semi-transparent)
+        if program_counts and capacity_cagr is not None:
+            _last_pc = program_counts.get(all_years[-1], _pc_vals[-1] if _pc_vals else 0)
+            _proj_pc_yrs = []
+            _proj_pc_vals = []
+            for i, y in enumerate(proj_years_list):
+                _proj_pc_yrs.append(y)
+                _proj_pc_vals.append(
+                    max(int(round(_last_pc * (1 + capacity_cagr) ** (i + 1))), 0)
+                )
+            fig.add_trace(
+                go.Bar(
+                    x=_proj_pc_yrs,
+                    y=_proj_pc_vals,
+                    name="Programs (projected)",
+                    marker=dict(
+                        color="rgba(15, 134, 193, 0.08)",
+                        line=dict(color="rgba(15, 134, 193, 0.25)", width=1),
+                    ),
+                    hovertemplate="%{y:,} programs (projected)<extra></extra>",
+                    showlegend=False,
+                ),
+                secondary_y=True,
+            )
+
     # 1. NCES-constrained projection (gray, circle markers)
     if projection:
         _nces_yrs = [p[0] for p in projection]
@@ -1612,19 +1772,22 @@ def main():
         _nces_txt_op = 0.4 if blended_projection else 0.6
         _nces_color = f"rgba(160, 160, 160, {_nces_op})" if blended_projection else f"rgba(242, 104, 34, {_nces_op})"
         _nces_txt_color = f"rgba(160, 160, 160, {_nces_txt_op})" if blended_projection else f"rgba(242, 104, 34, {_nces_txt_op})"
-        fig.add_trace(go.Scatter(
-            x=[all_years[-1]] + _nces_yrs,
-            y=[last_actual_val] + _nces_vals,
-            mode="lines+markers" + ("" if blended_projection else "+text"),
-            name="NCES-constrained",
-            line=dict(color=_nces_color, width=2, dash="dash"),
-            marker=dict(size=6, symbol="circle", color=_nces_color),
-            text=[""] + [f"{v:,}" for v in _nces_vals],
-            textposition="top center",
-            textfont=dict(size=9, color=_nces_txt_color),
-            hovertemplate="%{y:,.0f} (NCES projection)<extra></extra>",
-            showlegend=False,
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=[all_years[-1]] + _nces_yrs,
+                y=[last_actual_val] + _nces_vals,
+                mode="lines+markers" + ("" if blended_projection else "+text"),
+                name="NCES-constrained",
+                line=dict(color=_nces_color, width=2, dash="dash"),
+                marker=dict(size=6, symbol="circle", color=_nces_color),
+                text=[""] + [f"{v:,}" for v in _nces_vals],
+                textposition="top center",
+                textfont=dict(size=9, color=_nces_txt_color),
+                hovertemplate="%{y:,.0f} (NCES projection)<extra></extra>",
+                showlegend=False,
+            ),
+            secondary_y=False,
+        )
 
     # 2. Employment-CAGR projection (gray, square markers)
     if emp_projection:
@@ -1634,41 +1797,48 @@ def main():
         _emp_txt_op = 0.4 if blended_projection else 0.6
         _emp_color = f"rgba(160, 160, 160, {_emp_op})" if blended_projection else f"rgba(15, 134, 193, {_emp_op})"
         _emp_txt_color = f"rgba(160, 160, 160, {_emp_txt_op})" if blended_projection else f"rgba(15, 134, 193, {_emp_txt_op})"
-        fig.add_trace(go.Scatter(
-            x=[all_years[-1]] + _emp_yrs,
-            y=[last_actual_val] + _emp_vals,
-            mode="lines+markers" + ("" if blended_projection else "+text"),
-            name="Employment CAGR",
-            line=dict(color=_emp_color, width=2, dash="dash"),
-            marker=dict(size=6, symbol="square", color=_emp_color),
-            text=[""] + [f"{v:,}" for v in _emp_vals],
-            textposition="bottom center",
-            textfont=dict(size=9, color=_emp_txt_color),
-            hovertemplate="%{y:,.0f} (employment CAGR projection)<extra></extra>",
-            showlegend=False,
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=[all_years[-1]] + _emp_yrs,
+                y=[last_actual_val] + _emp_vals,
+                mode="lines+markers" + ("" if blended_projection else "+text"),
+                name="Employment CAGR",
+                line=dict(color=_emp_color, width=2, dash="dash"),
+                marker=dict(size=6, symbol="square", color=_emp_color),
+                text=[""] + [f"{v:,}" for v in _emp_vals],
+                textposition="bottom center",
+                textfont=dict(size=9, color=_emp_txt_color),
+                hovertemplate="%{y:,.0f} (employment CAGR projection)<extra></extra>",
+                showlegend=False,
+            ),
+            secondary_y=False,
+        )
 
     # 3. Blended projection (bold orange, diamond markers)
     if blended_projection:
         _bl_yrs = [p[0] for p in blended_projection]
         _bl_vals = [p[1] for p in blended_projection]
-        fig.add_trace(go.Scatter(
-            x=[all_years[-1]] + _bl_yrs,
-            y=[last_actual_val] + _bl_vals,
-            mode="lines+markers+text",
-            name="Blended",
-            line=dict(color="rgba(242, 104, 34, 0.7)", width=3, dash="dash"),
-            marker=dict(size=8, symbol="diamond", color="rgba(242, 104, 34, 0.7)"),
-            text=[""] + [f"{v:,}" for v in _bl_vals],
-            textposition="top center",
-            textfont=dict(size=10, color="rgba(242, 104, 34, 0.85)"),
-            hovertemplate="%{y:,.0f} (blended projection)<extra></extra>",
-            showlegend=False,
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=[all_years[-1]] + _bl_yrs,
+                y=[last_actual_val] + _bl_vals,
+                mode="lines+markers+text",
+                name="Blended",
+                line=dict(color="rgba(242, 104, 34, 0.7)", width=3, dash="dash"),
+                marker=dict(size=8, symbol="diamond", color="rgba(242, 104, 34, 0.7)"),
+                text=[""] + [f"{v:,}" for v in _bl_vals],
+                textposition="top center",
+                textfont=dict(size=10, color="rgba(242, 104, 34, 0.85)"),
+                hovertemplate="%{y:,.0f} (blended projection)<extra></extra>",
+                showlegend=False,
+            ),
+            secondary_y=False,
+        )
 
     chart_tick_labels = [yr_label(y) for y in chart_years]
 
     fig.update_layout(
+        title=dict(text=chart_title, font=dict(size=15), x=0, xanchor="left"),
         xaxis=dict(
             tickmode="array",
             tickvals=chart_years,
@@ -1678,37 +1848,60 @@ def main():
             gridcolor="#F3F4F6",
             gridwidth=1,
         ),
-        yaxis=dict(
-            tickformat=",",
-            showgrid=True,
-            gridcolor="#F3F4F6",
-            gridwidth=1,
-            zeroline=False,
-            rangemode="tozero",
-        ),
         hovermode="x unified",
-        showlegend=False,
-        height=520,
-        margin=dict(t=90, b=60, l=70, r=20),
+        showlegend=True,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="left", x=0, font=dict(size=11),
+        ),
+        height=540,
+        margin=dict(t=100, b=60, l=70, r=70),
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(family="Montserrat, Arial, sans-serif", size=13, color="#333333"),
+        bargap=0.35,
+    )
+    fig.update_yaxes(
+        title_text="Total Completions",
+        tickformat=",",
+        showgrid=True,
+        gridcolor="#F3F4F6",
+        gridwidth=1,
+        zeroline=False,
+        rangemode="tozero",
+        secondary_y=False,
+    )
+    fig.update_yaxes(
+        title_text="Programs Offered",
+        tickformat=",",
+        showgrid=False,
+        zeroline=False,
+        rangemode="tozero",
+        secondary_y=True,
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
     # Projection methodology note
+    _cap_note = ""
+    if capacity_cagr is not None and abs(capacity_cagr) >= 0.005:
+        _cap_note = (
+            f" Adjusted for program capacity trend ({capacity_cagr:+.1%}/yr): "
+            f"{'expanding' if capacity_cagr > 0 else 'contracting'} number of "
+            f"programs offering this credential."
+        )
+
     if blended_projection:
         st.caption(
-            f"**Projection lines:** NCES-constrained (supply-side, orange) extrapolates the recent "
-            f"share trend against projected national completions. Employment CAGR (demand-side, blue) "
+            f"**Projection lines:** NCES-constrained (supply-side) extrapolates the recent "
+            f"share trend against projected national completions. Employment CAGR (demand-side) "
             f"blends BLS-projected employment growth ({emp_cagr_for_completions:+.1%}/yr) with recent "
-            f"completions momentum. Blended (green) is the 50/50 average of both."
+            f"completions momentum. Blended is the 50/50 average of both.{_cap_note}"
         )
     elif projection:
         st.caption(
             "**Projection:** NCES-constrained model extrapolating recent share trend "
-            "against projected national completions."
+            f"against projected national completions.{_cap_note}"
         )
 
     # ── YoY change bar chart ───────────────────────────────────────────────────
