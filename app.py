@@ -1046,6 +1046,9 @@ def run_google_trends_query(
       - 'time_series': DataFrame(date, interest) — national monthly averages
       - 'geo_interest': float or None — interest index for selected geography
       - 'search_terms': list[str] — search terms used
+      - 'state_data': DataFrame(state_abbr, interest) — all states
+      - 'top_dmas': DataFrame(dma_name, interest) — top 15 DMAs by interest
+      - 'per_cip_time': DataFrame(date, cipcode, search_term, interest) — per-CIP
     Or None if no data is available.
     """
     conn = get_conn()
@@ -1120,6 +1123,41 @@ def run_google_trends_query(
         ).fetchall()
     ]
 
+    # 4. State-level interest (all states, for choropleth map)
+    state_sql = f"""
+        SELECT state_abbr, AVG(interest) AS interest
+        FROM google_trends_state
+        WHERE ({cip_where})
+        GROUP BY state_abbr
+        ORDER BY interest DESC
+    """
+    df_states = pd.read_sql_query(state_sql, conn, params=cip_params)
+
+    # 5. Top DMA markets (top 15 by interest, for bar chart)
+    dma_sql = f"""
+        SELECT dma_name, AVG(interest) AS interest
+        FROM google_trends_dma
+        WHERE ({cip_where}) AND interest > 0
+        GROUP BY dma_code
+        ORDER BY interest DESC
+        LIMIT 15
+    """
+    df_dmas = pd.read_sql_query(dma_sql, conn, params=cip_params)
+
+    # 6. Per-CIP time series (for multi-program comparison)
+    per_cip_sql = f"""
+        SELECT SUBSTR(date, 1, 7) AS month, cipcode, search_term,
+               AVG(interest) AS interest
+        FROM google_trends_time
+        WHERE ({cip_where})
+        GROUP BY cipcode, month
+        ORDER BY cipcode, month
+    """
+    df_per_cip = pd.read_sql_query(per_cip_sql, conn, params=cip_params)
+    if not df_per_cip.empty:
+        df_per_cip["date"] = pd.to_datetime(df_per_cip["month"] + "-01")
+        df_per_cip = df_per_cip[["date", "cipcode", "search_term", "interest"]]
+
     conn.close()
 
     if df_time.empty:
@@ -1129,6 +1167,9 @@ def run_google_trends_query(
         "time_series": df_time,
         "geo_interest": round(geo_interest, 1) if geo_interest is not None else None,
         "search_terms": terms,
+        "state_data": df_states,
+        "top_dmas": df_dmas,
+        "per_cip_time": df_per_cip,
     }
 
 
@@ -2116,43 +2157,236 @@ def main():
                 f"{_peak_date.strftime('%b %Y')}" if pd.notna(_peak_date) else "N/A",
             )
 
-            # National interest-over-time chart
-            fig_trend = go.Figure()
-            fig_trend.add_trace(go.Scatter(
-                x=df_trend["date"],
-                y=df_trend["interest"],
-                mode="lines",
-                name="Search Interest",
-                line=dict(width=2, color="#8B5CF6"),
-                fill="tozeroy",
-                fillcolor="rgba(139, 92, 246, 0.1)",
-                hovertemplate="<b>%{x|%b %Y}</b><br>Interest: %{y:.0f}<extra></extra>",
-            ))
+            # ── Chart 1: National Interest Over Time ─────────────────────
+            df_per_cip = trends_data["per_cip_time"]
+            _multi_cip = (
+                not df_per_cip.empty
+                and df_per_cip["cipcode"].nunique() > 1
+            )
+
+            _trend_colors = [
+                "#8B5CF6", "#0f86c1", "#e87537", "#10B981", "#EF4444",
+                "#F59E0B", "#EC4899", "#14B8A6", "#6366F1", "#F97316",
+            ]
+
+            if _multi_cip:
+                # Per-CIP comparison chart
+                fig_trend = go.Figure()
+                for idx, (cip, grp) in enumerate(
+                    df_per_cip.groupby("cipcode", sort=False)
+                ):
+                    _color = _trend_colors[idx % len(_trend_colors)]
+                    _label = grp["search_term"].iloc[0]
+                    fig_trend.add_trace(go.Scatter(
+                        x=grp["date"],
+                        y=grp["interest"],
+                        mode="lines",
+                        name=_label,
+                        line=dict(width=2, color=_color),
+                        hovertemplate=(
+                            f"<b>{_label}</b><br>"
+                            "%{x|%b %Y}<br>Interest: %{y:.0f}<extra></extra>"
+                        ),
+                    ))
+                # Also show aggregate as dashed line
+                fig_trend.add_trace(go.Scatter(
+                    x=df_trend["date"],
+                    y=df_trend["interest"],
+                    mode="lines",
+                    name="Average (all selected)",
+                    line=dict(width=2.5, color="#333333", dash="dash"),
+                    hovertemplate=(
+                        "<b>Average</b><br>"
+                        "%{x|%b %Y}<br>Interest: %{y:.0f}<extra></extra>"
+                    ),
+                ))
+                _show_legend = True
+                _chart_title = "<b>National Search Interest by Program</b>"
+            else:
+                # Single CIP area chart
+                fig_trend = go.Figure()
+                fig_trend.add_trace(go.Scatter(
+                    x=df_trend["date"],
+                    y=df_trend["interest"],
+                    mode="lines",
+                    name="Search Interest",
+                    line=dict(width=2, color="#8B5CF6"),
+                    fill="tozeroy",
+                    fillcolor="rgba(139, 92, 246, 0.1)",
+                    hovertemplate=(
+                        "<b>%{x|%b %Y}</b><br>"
+                        "Interest: %{y:.0f}<extra></extra>"
+                    ),
+                ))
+                _show_legend = False
+                _chart_title = "<b>National Search Interest Over Time</b>"
+
             fig_trend.update_layout(
                 title=dict(
-                    text="<b>National Search Interest Over Time</b>",
+                    text=_chart_title,
                     font=dict(size=15), x=0, xanchor="left",
                 ),
-                xaxis=dict(title="", showgrid=True, gridcolor="#F3F4F6", gridwidth=1),
+                xaxis=dict(
+                    title="", showgrid=True,
+                    gridcolor="#F3F4F6", gridwidth=1,
+                ),
                 yaxis=dict(
                     title="Interest (0-100)",
                     showgrid=True, gridcolor="#F3F4F6", gridwidth=1,
                     rangemode="tozero", range=[0, 105],
                 ),
-                height=380,
+                height=400,
                 margin=dict(t=60, b=40, l=60, r=20),
                 plot_bgcolor="white",
                 paper_bgcolor="white",
-                font=dict(family="Montserrat, Arial, sans-serif", size=12, color="#333333"),
-                showlegend=False,
+                font=dict(
+                    family="Montserrat, Arial, sans-serif",
+                    size=12, color="#333333",
+                ),
+                showlegend=_show_legend,
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="left", x=0, font=dict(size=11),
+                ),
+                hovermode="x unified",
             )
             st.plotly_chart(fig_trend, use_container_width=True)
 
-            _terms_display = ", ".join(f"**{t}**" for t in _search_terms[:5])
+            # ── Chart 2 & 3: State Map + Top Markets (side by side) ───
+            df_states = trends_data["state_data"]
+            df_dmas = trends_data["top_dmas"]
+
+            _has_state_chart = not df_states.empty
+            _has_dma_chart = not df_dmas.empty and len(df_dmas) > 0
+
+            if _has_state_chart or _has_dma_chart:
+                if _has_state_chart and _has_dma_chart:
+                    col_map, col_bar = st.columns([3, 2])
+                elif _has_state_chart:
+                    col_map = st.container()
+                else:
+                    col_bar = st.container()
+
+                # ── Choropleth map ────────────────────────────────────
+                if _has_state_chart:
+                    with col_map:
+                        fig_map = go.Figure(go.Choropleth(
+                            locations=df_states["state_abbr"],
+                            z=df_states["interest"],
+                            locationmode="USA-states",
+                            colorscale=[
+                                [0, "#F5F3FF"],
+                                [0.25, "#DDD6FE"],
+                                [0.5, "#A78BFA"],
+                                [0.75, "#7C3AED"],
+                                [1, "#4C1D95"],
+                            ],
+                            colorbar=dict(
+                                title="Interest",
+                                thickness=12,
+                                len=0.6,
+                                tickfont=dict(size=10),
+                            ),
+                            hovertemplate=(
+                                "<b>%{location}</b><br>"
+                                "Interest: %{z:.0f}/100"
+                                "<extra></extra>"
+                            ),
+                        ))
+                        fig_map.update_layout(
+                            title=dict(
+                                text="<b>Search Interest by State</b>",
+                                font=dict(size=14), x=0, xanchor="left",
+                            ),
+                            geo=dict(
+                                scope="usa",
+                                bgcolor="white",
+                                lakecolor="white",
+                                showlakes=True,
+                                landcolor="#FAFAFA",
+                                projection_type="albers usa",
+                            ),
+                            height=340,
+                            margin=dict(t=50, b=10, l=10, r=10),
+                            paper_bgcolor="white",
+                            font=dict(
+                                family="Montserrat, Arial, sans-serif",
+                                size=12, color="#333333",
+                            ),
+                        )
+                        st.plotly_chart(
+                            fig_map, use_container_width=True
+                        )
+
+                # ── Top DMA Markets bar chart ─────────────────────────
+                if _has_dma_chart:
+                    with col_bar:
+                        # Reverse for horizontal bar (highest at top)
+                        df_bar = df_dmas.sort_values(
+                            "interest", ascending=True
+                        ).tail(15)
+                        # Truncate long DMA names
+                        df_bar["label"] = df_bar["dma_name"].apply(
+                            lambda n: (n[:28] + "...") if len(n) > 30 else n
+                        )
+                        fig_bar = go.Figure(go.Bar(
+                            x=df_bar["interest"],
+                            y=df_bar["label"],
+                            orientation="h",
+                            marker=dict(
+                                color=df_bar["interest"],
+                                colorscale=[
+                                    [0, "#DDD6FE"],
+                                    [0.5, "#A78BFA"],
+                                    [1, "#7C3AED"],
+                                ],
+                            ),
+                            hovertemplate=(
+                                "<b>%{y}</b><br>"
+                                "Interest: %{x:.0f}/100"
+                                "<extra></extra>"
+                            ),
+                        ))
+                        fig_bar.update_layout(
+                            title=dict(
+                                text="<b>Top Markets (DMA)</b>",
+                                font=dict(size=14), x=0, xanchor="left",
+                            ),
+                            xaxis=dict(
+                                title="Interest (0-100)",
+                                showgrid=True, gridcolor="#F3F4F6",
+                                gridwidth=1, range=[0, 105],
+                            ),
+                            yaxis=dict(
+                                title="",
+                                tickfont=dict(size=10),
+                            ),
+                            height=340,
+                            margin=dict(t=50, b=40, l=10, r=20),
+                            plot_bgcolor="white",
+                            paper_bgcolor="white",
+                            font=dict(
+                                family="Montserrat, Arial, sans-serif",
+                                size=12, color="#333333",
+                            ),
+                            showlegend=False,
+                            bargap=0.25,
+                        )
+                        st.plotly_chart(
+                            fig_bar, use_container_width=True
+                        )
+
+            _terms_display = ", ".join(
+                f"**{t}**" for t in _search_terms[:5]
+            )
+            _more_terms = (
+                f" (+{len(_search_terms) - 5} more)"
+                if len(_search_terms) > 5 else ""
+            )
             st.caption(
                 f"Search interest reflects relative Google search volume "
                 f"(0 = no interest, 100 = peak over period). "
-                f"Search term(s): {_terms_display} "
+                f"Search term(s): {_terms_display}{_more_terms} "
                 f"| Source: Google Trends"
             )
 
