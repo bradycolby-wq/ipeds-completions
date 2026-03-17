@@ -248,6 +248,18 @@ CREATE INDEX IF NOT EXISTS idx_inst_control  ON institutions(control);
 CREATE INDEX IF NOT EXISTS idx_inst_iclevel  ON institutions(iclevel);
 CREATE INDEX IF NOT EXISTS idx_inst_year     ON institutions(year);
 CREATE INDEX IF NOT EXISTS idx_inst_locale   ON institutions(locale);
+
+CREATE TABLE IF NOT EXISTS distance_ed_status (
+    year      INTEGER NOT NULL,
+    unitid    INTEGER NOT NULL,
+    distnced  INTEGER,
+    distcrs   INTEGER,
+    distpgs   INTEGER,
+    PRIMARY KEY (year, unitid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dest_year     ON distance_ed_status(year);
+CREATE INDEX IF NOT EXISTS idx_dest_distnced ON distance_ed_status(distnced);
 """
 
 VIEW_DDL = """
@@ -397,6 +409,37 @@ def load_institutions(conn, year: int, csv_path: Path):
     return len(batch)
 
 
+def load_distance_ed_status(conn, year: int, csv_path: Path):
+    """Load IC (Institutional Characteristics) distance-education status."""
+    existing = conn.execute(
+        "SELECT COUNT(*) FROM distance_ed_status WHERE year=?", (year,)
+    ).fetchone()[0]
+    if existing > 0:
+        log(f"  [skip] distance_ed_status {year} already in DB ({existing:,} rows)")
+        return existing
+
+    _, rows = read_csv(csv_path)
+    if not rows:
+        log(f"  [warn] no rows in {csv_path.name}")
+        return 0
+
+    batch = []
+    for row in rows:
+        unitid   = safe_int(row.get("UNITID"))
+        distnced = safe_int(row.get("DISTNCED"))
+        distcrs  = safe_int(row.get("DISTCRS"))
+        distpgs  = safe_int(row.get("DISTPGS"))
+        if unitid:
+            batch.append((year, unitid, distnced, distcrs, distpgs))
+
+    conn.executemany(
+        "INSERT OR REPLACE INTO distance_ed_status VALUES (?,?,?,?,?)", batch
+    )
+    conn.commit()
+    log(f"  -> {len(batch):,} distance_ed_status rows loaded for {year}")
+    return len(batch)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -435,6 +478,14 @@ def main():
             if csv_path:
                 load_institutions(conn, year, csv_path)
 
+        # --- Distance Education status (IC = Institutional Characteristics) ---
+        ic_zip = ZIPS_DIR / f"IC{year}.zip"
+        download_file(BASE_URL + f"IC{year}.zip", ic_zip, f"Inst. Char. {year}")
+        if ic_zip.exists():
+            csv_path = extract_csv(ic_zip, f"ic{year}")
+            if csv_path:
+                load_distance_ed_status(conn, year, csv_path)
+
     log("\n[final] Creating completions_view...")
     conn.executescript(VIEW_DDL)
     conn.commit()
@@ -442,6 +493,7 @@ def main():
     # Summary
     n_comp = conn.execute("SELECT COUNT(*) FROM completions").fetchone()[0]
     n_inst = conn.execute("SELECT COUNT(*) FROM institutions").fetchone()[0]
+    n_dist = conn.execute("SELECT COUNT(*) FROM distance_ed_status").fetchone()[0]
     years_loaded = conn.execute(
         "SELECT MIN(year), MAX(year), COUNT(DISTINCT year) FROM completions"
     ).fetchone()
@@ -452,6 +504,7 @@ def main():
     log(f"  Database : {DB_PATH}")
     log(f"  Completions rows : {n_comp:,}")
     log(f"  Institution rows : {n_inst:,}")
+    log(f"  Dist. Ed. rows   : {n_dist:,}")
     log(f"  Years loaded     : {years_loaded[0]}-{years_loaded[1]} ({years_loaded[2]} years)")
     log("=" * 60)
     log("\nRun query_ipeds.py to search the data.")

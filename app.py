@@ -732,6 +732,96 @@ def run_program_count_query(
 
 
 @st.cache_data(show_spinner=False, ttl=600)
+def run_distance_ed_query(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    geo_key: str,
+    geo_values: tuple,
+):
+    """DE program counts and DE completions per year.
+
+    Joins completions with distance_ed_status (from IPEDS IC survey) on
+    (year, unitid) to identify institutions offering distance education
+    (distnced IN (1, 2) = all or some programs offered via DE).
+    Only includes programs with at least 1 completion (ctotalt > 0).
+
+    Returns dict with 'de_program_counts' and 'de_completions' keyed by year,
+    or None if distance_ed_status table doesn't exist / no data.
+    """
+    cip_patterns = expand_cip_patterns(cip_patterns)
+
+    conn = get_conn()
+
+    # Gracefully handle missing table
+    try:
+        conn.execute("SELECT 1 FROM distance_ed_status LIMIT 1")
+    except Exception:
+        conn.close()
+        return None
+
+    params = []
+    where = [
+        "c.majornum = 1",
+        "c.ctotalt IS NOT NULL",
+        "c.ctotalt > 0",
+        "d.distnced IN (1, 2)",
+    ]
+
+    if cip_patterns:
+        cip_clauses = []
+        for p in cip_patterns:
+            cip_clauses.append("c.cipcode LIKE ?" if "%" in p else "c.cipcode = ?")
+            params.append(p)
+        where.append(f"({' OR '.join(cip_clauses)})")
+
+    if awlevels:
+        placeholders = ",".join("?" * len(awlevels))
+        where.append(f"c.awlevel IN ({placeholders})")
+        params.extend(awlevels)
+
+    # Geography requires joining institutions
+    geo_join = ""
+    if geo_key == "state" and geo_values:
+        geo_join = "INNER JOIN institutions i ON c.unitid = i.unitid AND c.year = i.year"
+        placeholders = ",".join("?" * len(geo_values))
+        where.append(f"i.stabbr IN ({placeholders})")
+        params.extend(geo_values)
+    elif geo_key == "metro" and geo_values:
+        geo_join = "INNER JOIN institutions i ON c.unitid = i.unitid AND c.year = i.year"
+        placeholders = ",".join("?" * len(geo_values))
+        where.append(f"i.cbsa IN ({placeholders})")
+        params.extend(geo_values)
+
+    where_sql = "WHERE " + " AND ".join(where)
+
+    sql = f"""
+        SELECT
+            c.year,
+            COUNT(DISTINCT c.unitid) AS de_program_count,
+            SUM(c.ctotalt)           AS de_completions
+        FROM completions c
+        INNER JOIN distance_ed_status d
+            ON c.year = d.year
+            AND c.unitid = d.unitid
+        {geo_join}
+        {where_sql}
+        GROUP BY c.year
+        ORDER BY c.year
+    """
+
+    df = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+
+    if df.empty:
+        return None
+
+    return {
+        "de_program_counts": dict(zip(df["year"], df["de_program_count"])),
+        "de_completions": dict(zip(df["year"], df["de_completions"])),
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=600)
 def run_employment_query(
     cip_patterns: tuple,
     awlevels: tuple,
@@ -1617,6 +1707,12 @@ def main():
             geo_key=geo_key,
             geo_values=tuple(geo_values),
         )
+        de_data = run_distance_ed_query(
+            cip_patterns=cip_patterns,
+            awlevels=selected_awlevels,
+            geo_key=geo_key,
+            geo_values=tuple(geo_values),
+        )
 
     if df.empty:
         st.warning(
@@ -2179,6 +2275,161 @@ def main():
             mime="text/csv",
             key="dl_inst",
         )
+
+    # ── Distance Education ─────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Distance Education Programs")
+    st.caption(
+        "Institutions offering all or some programs via distance education with ≥1 completion "
+        "| Source: IPEDS Institutional Characteristics (IC) Survey"
+    )
+
+    if de_data is None:
+        st.info(
+            "Distance education data is not yet available. "
+            "Run `python setup_ipeds.py` to download IC survey files."
+        )
+    else:
+        de_counts = de_data["de_program_counts"]
+        de_completions = de_data["de_completions"]
+        de_years = sorted(de_counts.keys())
+
+        if not de_years:
+            st.info("No distance education programs found for these filters.")
+        else:
+            # Summary metrics
+            de_last_yr = de_years[-1]
+            de_last_count = de_counts[de_last_yr]
+            de_last_comp = de_completions[de_last_yr]
+
+            # DE share of total completions
+            total_last = int(df_totals.get(de_last_yr, 0))
+            de_share = de_last_comp / total_last if total_last > 0 else None
+
+            # 3-year CAGR for DE completions
+            de_yr3 = de_last_yr - 3
+            de_comp3 = de_completions.get(de_yr3)
+            de_cagr3 = (
+                (de_last_comp / de_comp3) ** (1 / 3) - 1
+                if de_comp3 and de_comp3 > 0
+                else None
+            )
+
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric(
+                f"DE Programs ({yr_label(de_last_yr)})",
+                f"{de_last_count:,}",
+            )
+            d2.metric(
+                f"DE Completions ({yr_label(de_last_yr)})",
+                f"{de_last_comp:,}",
+            )
+            d3.metric(
+                "DE Share of Total",
+                f"{de_share:.1%}" if de_share is not None else "N/A",
+            )
+            d4.metric(
+                "DE Completions 3-yr CAGR",
+                f"{de_cagr3:+.1%}" if de_cagr3 is not None else "N/A",
+            )
+
+            # ── Dual-axis chart ──────────────────────────────────────────────
+            fig_de = make_subplots(specs=[[{"secondary_y": True}]])
+
+            # Bars: DE program count (secondary y-axis)
+            fig_de.add_trace(
+                go.Bar(
+                    x=de_years,
+                    y=[de_counts[y] for y in de_years],
+                    name="DE Programs",
+                    marker=dict(color="rgba(15, 134, 193, 0.25)"),
+                    text=[f"{de_counts[y]:,}" for y in de_years],
+                    textposition="outside",
+                    textfont=dict(size=9, color="rgba(15, 134, 193, 0.7)"),
+                    hovertemplate="%{y:,} DE programs<extra></extra>",
+                    showlegend=False,
+                ),
+                secondary_y=True,
+            )
+
+            # Line: DE completions (primary y-axis)
+            fig_de.add_trace(
+                go.Scatter(
+                    x=de_years,
+                    y=[de_completions[y] for y in de_years],
+                    mode="lines+markers+text",
+                    name="DE Completions",
+                    line=dict(width=2.5, color="#f26822"),
+                    marker=dict(size=9, color="#f26822"),
+                    text=[f"{de_completions[y]:,}" for y in de_years],
+                    textposition="top center",
+                    textfont=dict(size=11, color="#f26822"),
+                    hovertemplate="%{y:,.0f} DE completions<extra></extra>",
+                    showlegend=False,
+                ),
+                secondary_y=False,
+            )
+
+            de_tick_labels = [yr_label(y) for y in de_years]
+
+            fig_de.update_layout(
+                title=dict(
+                    text=(
+                        f"<b>Distance Education: {cip_display}</b>"
+                        f"<br><sup style='color:#999999'>{level_str} · {geo_label}</sup>"
+                    ),
+                    font=dict(size=15),
+                    x=0,
+                    xanchor="left",
+                ),
+                xaxis=dict(
+                    tickmode="array",
+                    tickvals=de_years,
+                    ticktext=de_tick_labels,
+                    tickangle=-30,
+                    showgrid=True,
+                    gridcolor="#F3F4F6",
+                    gridwidth=1,
+                ),
+                hovermode="x unified",
+                showlegend=False,
+                height=480,
+                margin=dict(t=100, b=60, l=70, r=70),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(
+                    family="Montserrat, Arial, sans-serif",
+                    size=13,
+                    color="#333333",
+                ),
+                bargap=0.35,
+            )
+            fig_de.update_yaxes(
+                title_text="DE Completions",
+                tickformat=",",
+                showgrid=True,
+                gridcolor="#F3F4F6",
+                gridwidth=1,
+                zeroline=False,
+                rangemode="tozero",
+                secondary_y=False,
+            )
+            fig_de.update_yaxes(
+                title_text="DE Programs (Institutions)",
+                tickformat=",",
+                showgrid=False,
+                zeroline=False,
+                rangemode="tozero",
+                secondary_y=True,
+            )
+
+            st.plotly_chart(fig_de, use_container_width=True)
+
+            st.caption(
+                "**DE Programs** = institutions offering all or some programs via distance "
+                "education (DISTNCED = 1 or 2) with ≥1 completion in the selected program.  \n"
+                "**DE Completions** = total completions from those institutions."
+            )
 
     # ── Graduate Outcomes (College Scorecard) ────────────────────────────────
     st.divider()
