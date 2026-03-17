@@ -24,7 +24,7 @@ except ImportError:
 # GitHub Release URL for the database (used on Streamlit Community Cloud)
 _GITHUB_DB_URL = (
     "https://github.com/bradycolby-wq/ipeds-completions/releases/"
-    "download/v1.2/ipeds.db"
+    "download/v1.3/ipeds.db"
 )
 
 
