@@ -2010,11 +2010,11 @@ def main():
                 "cover all institution / program combinations."
             )
         else:
-            # Deduplicate across distance modes (keep highest earnings per combo)
+            # Deduplicate across distance modes (keep highest earnings per institution)
             df_sc = (
                 df_sc
                 .sort_values("earn_mdn_4yr", ascending=False)
-                .drop_duplicates(subset=["unitid", "cipcode", "creddesc"], keep="first")
+                .drop_duplicates(subset=["unitid"], keep="first")
             )
 
             # ── Metrics row ───────────────────────────────────────────────
