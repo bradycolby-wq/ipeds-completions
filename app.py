@@ -832,9 +832,13 @@ def run_scorecard_query(
         SELECT
             sc.unitid,
             sc.instnm,
-            sc.cipcode,
-            sc.cipdesc,
-            sc.creddesc,
+            i.city || ', ' || i.stabbr AS city,
+            CASE i.control
+                WHEN 1 THEN 'Public'
+                WHEN 2 THEN 'Private'
+                WHEN 3 THEN 'For-Profit'
+                ELSE 'Unknown'
+            END AS control_name,
             sc.earn_mdn_4yr,
             sc.debt_all_stgp_eval_mdn,
             sc.debt_to_earnings,
@@ -2041,8 +2045,8 @@ def main():
             # ── Detail table ──────────────────────────────────────────────
             sc_display = df_sc.rename(columns={
                 "instnm": "Institution",
-                "cipdesc": "Program",
-                "creddesc": "Credential",
+                "city": "City",
+                "control_name": "Control",
                 "earn_mdn_4yr": "Median Earnings (4yr)",
                 "debt_all_stgp_eval_mdn": "Median Debt",
                 "debt_to_earnings": "Debt/Earnings",
@@ -2051,7 +2055,7 @@ def main():
                 "Debt/Earnings", ascending=True, na_position="last"
             )
             sc_display = sc_display[
-                ["Institution", "Program", "Credential",
+                ["Institution", "City", "Control",
                  "Median Earnings (4yr)", "Median Debt", "Debt/Earnings"]
             ].reset_index(drop=True)
 
@@ -2059,8 +2063,8 @@ def main():
 
             sc_col_cfg = {
                 "Institution": st.column_config.TextColumn("Institution", width=250),
-                "Program": st.column_config.TextColumn("Program", width=200),
-                "Credential": st.column_config.TextColumn("Credential", width=130),
+                "City": st.column_config.TextColumn("City", width=160),
+                "Control": st.column_config.TextColumn("Control", width=85),
                 "Median Earnings (4yr)": st.column_config.NumberColumn(
                     "Median Earnings (4yr)", format="$%,.0f", width=155,
                 ),
