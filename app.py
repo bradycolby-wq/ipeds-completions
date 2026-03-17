@@ -1034,6 +1034,104 @@ def get_emp_proj_cagr(
     )
 
 
+@st.cache_data(show_spinner=False, ttl=600)
+def run_google_trends_query(
+    cip_patterns: tuple,
+    geo_key: str,
+    geo_values: tuple,
+):
+    """Query Google Trends interest data for selected CIP codes and geography.
+
+    Returns dict with:
+      - 'time_series': DataFrame(date, interest) — national monthly averages
+      - 'geo_interest': float or None — interest index for selected geography
+      - 'search_terms': list[str] — search terms used
+    Or None if no data is available.
+    """
+    conn = get_conn()
+    try:
+        conn.execute("SELECT 1 FROM google_trends_time LIMIT 1")
+    except Exception:
+        conn.close()
+        return None
+
+    if not cip_patterns:
+        conn.close()
+        return None
+
+    # Build CIP filter
+    cip_clauses, cip_params = [], []
+    for p in cip_patterns:
+        cip_clauses.append("cipcode LIKE ?" if "%" in p else "cipcode = ?")
+        cip_params.append(p)
+    cip_where = " OR ".join(cip_clauses)
+
+    # 1. National time series (aggregate to monthly, average across matched CIPs)
+    time_sql = f"""
+        SELECT SUBSTR(date, 1, 7) AS month, AVG(interest) AS interest
+        FROM google_trends_time
+        WHERE ({cip_where})
+        GROUP BY month
+        ORDER BY month
+    """
+    df_time = pd.read_sql_query(time_sql, conn, params=cip_params)
+    if not df_time.empty:
+        df_time["date"] = pd.to_datetime(df_time["month"] + "-01")
+        df_time = df_time[["date", "interest"]]
+
+    # 2. Geographic interest
+    geo_interest = None
+    if geo_key == "national":
+        if not df_time.empty:
+            geo_interest = df_time.tail(12)["interest"].mean()
+    elif geo_key == "state" and geo_values:
+        st_ph = ",".join("?" * len(geo_values))
+        row = conn.execute(
+            f"SELECT AVG(interest) FROM google_trends_state "
+            f"WHERE ({cip_where}) AND state_abbr IN ({st_ph})",
+            cip_params + list(geo_values),
+        ).fetchone()
+        if row and row[0] is not None:
+            geo_interest = row[0]
+    elif geo_key == "metro" and geo_values:
+        cbsa_ph = ",".join("?" * len(geo_values))
+        try:
+            row = conn.execute(
+                f"""SELECT AVG(cbsa_interest) FROM (
+                    SELECT gt.cipcode,
+                        SUM(gt.interest * w.weight) / SUM(w.weight) AS cbsa_interest
+                    FROM google_trends_dma gt
+                    JOIN dma_cbsa_weights w ON gt.dma_code = w.dma_code
+                    WHERE ({cip_where}) AND w.cbsa_code IN ({cbsa_ph})
+                    GROUP BY gt.cipcode
+                )""",
+                cip_params + list(geo_values),
+            ).fetchone()
+            if row and row[0] is not None:
+                geo_interest = row[0]
+        except Exception:
+            pass  # dma_cbsa_weights table may not exist
+
+    # 3. Search terms used
+    terms = [
+        r[0] for r in conn.execute(
+            f"SELECT DISTINCT search_term FROM google_trends_time WHERE ({cip_where})",
+            cip_params,
+        ).fetchall()
+    ]
+
+    conn.close()
+
+    if df_time.empty:
+        return None
+
+    return {
+        "time_series": df_time,
+        "geo_interest": round(geo_interest, 1) if geo_interest is not None else None,
+        "search_terms": terms,
+    }
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 def main():
     # One-time DB prep
@@ -1948,6 +2046,114 @@ def main():
                 file_name=sc_fname,
                 mime="text/csv",
                 key="dl_scorecard",
+            )
+
+    # ── Search Interest Trends ────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Search Interest Trends")
+
+    _trends_ok = False
+    try:
+        _t_conn = get_conn()
+        _t_conn.execute("SELECT 1 FROM google_trends_time LIMIT 1")
+        _t_conn.close()
+        _trends_ok = True
+    except Exception:
+        pass
+
+    if not _trends_ok:
+        st.info(
+            "Google Trends data not loaded. Run `python load_google_trends.py` "
+            "to download search interest data."
+        )
+    elif all_cips:
+        st.info(
+            "Search interest data is shown when specific CIP code(s) are selected. "
+            "Deselect **All CIP codes** and choose program(s) to see search trends."
+        )
+    else:
+        with st.spinner("Querying search interest data..."):
+            trends_data = run_google_trends_query(
+                cip_patterns=cip_patterns,
+                geo_key=geo_key,
+                geo_values=tuple(geo_values),
+            )
+
+        if trends_data is None:
+            st.info("No search interest data available for the selected program(s).")
+        else:
+            df_trend = trends_data["time_series"]
+            _geo_interest = trends_data["geo_interest"]
+            _search_terms = trends_data["search_terms"]
+
+            # YoY change: compare latest 12 months to prior 12 months
+            _yoy_change = None
+            if len(df_trend) >= 24:
+                _recent = df_trend.tail(12)["interest"].mean()
+                _prior = df_trend.iloc[-24:-12]["interest"].mean()
+                if _prior > 0:
+                    _yoy_change = (_recent - _prior) / _prior
+
+            # Peak interest
+            _peak_idx = df_trend["interest"].idxmax()
+            _peak_date = df_trend.loc[_peak_idx, "date"]
+            _peak_val = df_trend.loc[_peak_idx, "interest"]
+
+            # Metrics
+            t1, t2, t3 = st.columns(3)
+            t1.metric(
+                f"Search Interest ({geo_label})",
+                f"{_geo_interest:.0f}/100" if _geo_interest is not None else "N/A",
+                help="Google Trends relative interest (0=none, 100=peak). "
+                     "Higher values indicate more search activity.",
+            )
+            t2.metric(
+                "YoY Interest Change",
+                f"{_yoy_change:+.1%}" if _yoy_change is not None else "N/A",
+            )
+            t3.metric(
+                "Peak Interest",
+                f"{_peak_date.strftime('%b %Y')}" if pd.notna(_peak_date) else "N/A",
+            )
+
+            # National interest-over-time chart
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(
+                x=df_trend["date"],
+                y=df_trend["interest"],
+                mode="lines",
+                name="Search Interest",
+                line=dict(width=2, color="#8B5CF6"),
+                fill="tozeroy",
+                fillcolor="rgba(139, 92, 246, 0.1)",
+                hovertemplate="<b>%{x|%b %Y}</b><br>Interest: %{y:.0f}<extra></extra>",
+            ))
+            fig_trend.update_layout(
+                title=dict(
+                    text="<b>National Search Interest Over Time</b>",
+                    font=dict(size=15), x=0, xanchor="left",
+                ),
+                xaxis=dict(title="", showgrid=True, gridcolor="#F3F4F6", gridwidth=1),
+                yaxis=dict(
+                    title="Interest (0-100)",
+                    showgrid=True, gridcolor="#F3F4F6", gridwidth=1,
+                    rangemode="tozero", range=[0, 105],
+                ),
+                height=380,
+                margin=dict(t=60, b=40, l=60, r=20),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(family="Montserrat, Arial, sans-serif", size=12, color="#333333"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_trend, use_container_width=True)
+
+            _terms_display = ", ".join(f"**{t}**" for t in _search_terms[:5])
+            st.caption(
+                f"Search interest reflects relative Google search volume "
+                f"(0 = no interest, 100 = peak over period). "
+                f"Search term(s): {_terms_display} "
+                f"| Source: Google Trends"
             )
 
     # ── Related Employment by Occupation ─────────────────────────────────────
