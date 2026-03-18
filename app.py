@@ -3,7 +3,6 @@ IPEDS Completions Explorer
 Streamlit app — academic years 2014-15 through 2023-24
 """
 
-import re
 import sqlite3
 import urllib.request
 from pathlib import Path
@@ -842,34 +841,14 @@ _GENERIC_SOC_TITLES = {
 }
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def run_coresignal_query(
-    cip_patterns: tuple,
-    awlevels: tuple,
-    geo_key: str,
-    geo_values: tuple,
-):
-    """Query Coresignal Base Jobs API for active postings related to selected CIP codes.
-
-    Uses the CIP-SOC crosswalk to map programs to occupation titles, then searches
-    Coresignal for active job postings matching those titles.
-
-    Returns dict with 'total_postings', 'jobs_df', and 'search_titles',
-    or None if the API key is missing or no results found.
-    """
-    api_key = st.secrets.get("coresignal", {}).get("api_key", "")
-    if not api_key:
-        return None
-
-    cip_patterns = expand_cip_patterns(cip_patterns)
-
-    # Look up occupation titles from CIP-SOC crosswalk
+def _resolve_coresignal_titles(cip_patterns: tuple, awlevels: tuple) -> list:
+    """Map CIP codes to simplified occupation titles for Coresignal searches."""
     conn = get_conn()
     try:
         conn.execute("SELECT 1 FROM cip_soc_crosswalk LIMIT 1")
     except Exception:
         conn.close()
-        return None
+        return []
 
     params = []
     cip_clauses = []
@@ -895,10 +874,7 @@ def run_coresignal_query(
     soc_titles = [r[0] for r in conn.execute(sql, params).fetchall()]
     conn.close()
 
-    # Filter out generic titles and simplify for Coresignal title search
     soc_titles = [t for t in soc_titles if t not in _GENERIC_SOC_TITLES]
-    # Drop comma qualifiers ("Nurse Anesthetists, Certified" → "Nurse Anesthetists")
-    # and strip trailing plural "s" for better Coresignal matching
     simplified = []
     for t in soc_titles:
         t = t.split(",")[0].strip()
@@ -906,8 +882,34 @@ def run_coresignal_query(
             t = t[:-1]
         if t and t not in simplified:
             simplified.append(t)
-    search_titles = simplified[:3]
+    return simplified[:3]
 
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def run_coresignal_trend(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    geo_key: str,
+    geo_values: tuple,
+):
+    """Query Coresignal for monthly job posting counts over the last 12 months.
+
+    Uses the x-total-pages response header to get exact totals without
+    paginating (1 credit per month per title). Also collects a small sample
+    of recent postings for a detail table.
+
+    Returns dict with 'trend_df', 'current_active', 'search_titles', 'sample_df',
+    or None if the API key is missing or no results found.
+    """
+    from datetime import datetime, timedelta
+    import calendar
+
+    api_key = st.secrets.get("coresignal", {}).get("api_key", "")
+    if not api_key:
+        return None
+
+    cip_patterns = expand_cip_patterns(cip_patterns)
+    search_titles = _resolve_coresignal_titles(cip_patterns, awlevels)
     if not search_titles:
         return None
 
@@ -915,83 +917,120 @@ def run_coresignal_query(
     session = _requests.Session()
     session.headers.update(headers)
 
-    # Search for job IDs across all selected occupation titles
-    all_ids = set()
+    # Build list of last 12 months
+    today = datetime.now()
+    months = []
+    for i in range(11, -1, -1):
+        dt = today.replace(day=1) - timedelta(days=i * 30)
+        dt = dt.replace(day=1)
+        last_day = calendar.monthrange(dt.year, dt.month)[1]
+        # For current month, cap at today
+        if dt.year == today.year and dt.month == today.month:
+            end_day = today.day
+        else:
+            end_day = last_day
+        months.append({
+            "label": dt.strftime("%Y-%m"),
+            "gte": f"{dt.year}-{dt.month:02d}-01 00:00:00",
+            "lte": f"{dt.year}-{dt.month:02d}-{end_day:02d} 23:59:59",
+        })
+
+    # Query posting counts per month (aggregate across all search titles)
+    trend_rows = []
+    for m in months:
+        month_total = 0
+        for title in search_titles:
+            body = {
+                "title": title,
+                "country": "United States",
+                "created_at_gte": m["gte"],
+                "created_at_lte": m["lte"],
+            }
+            if geo_key == "state" and geo_values:
+                body["location"] = geo_values[0]
+            try:
+                resp = session.post(
+                    f"{_CORESIGNAL_BASE}/search/filter", json=body, timeout=30
+                )
+                if resp.status_code == 200:
+                    total_pages = int(resp.headers.get("x-total-pages", 1))
+                    items_per_page = int(resp.headers.get("x-items-per-page", 1000))
+                    month_total += total_pages * items_per_page
+            except Exception:
+                continue
+        trend_rows.append({"month": m["label"], "postings": month_total})
+
+    trend_df = pd.DataFrame(trend_rows)
+
+    if trend_df["postings"].sum() == 0:
+        return None
+
+    # Get current active postings count
+    current_active = 0
     for title in search_titles:
         body = {"title": title, "country": "United States", "application_active": True}
         if geo_key == "state" and geo_values:
-            # Coresignal accepts full state names; convert abbreviations
-            body["location"] = geo_values[0]  # use first state as location hint
+            body["location"] = geo_values[0]
+        try:
+            resp = session.post(f"{_CORESIGNAL_BASE}/search/filter", json=body, timeout=30)
+            if resp.status_code == 200:
+                total_pages = int(resp.headers.get("x-total-pages", 1))
+                items_per_page = int(resp.headers.get("x-items-per-page", 1000))
+                current_active += total_pages * items_per_page
+        except Exception:
+            continue
+
+    # Collect a small sample of recent postings for the detail table
+    sample_ids = []
+    for title in search_titles[:1]:  # just first title to save credits
+        body = {"title": title, "country": "United States", "application_active": True}
+        if geo_key == "state" and geo_values:
+            body["location"] = geo_values[0]
         try:
             resp = session.post(f"{_CORESIGNAL_BASE}/search/filter", json=body, timeout=30)
             if resp.status_code == 200:
                 ids = resp.json()
                 if isinstance(ids, list):
-                    all_ids.update(ids)
+                    sample_ids = ids[:20]
         except Exception:
-            continue
+            pass
 
-    if not all_ids:
-        return None
-
-    total_postings = len(all_ids)
-
-    # Collect details for a sample of up to 50 jobs
-    sample_ids = list(all_ids)[:50]
-    jobs = []
+    sample_rows = []
     for jid in sample_ids:
         try:
             resp = session.get(f"{_CORESIGNAL_BASE}/collect/{jid}", timeout=15)
             if resp.status_code == 200:
-                jobs.append(resp.json())
+                j = resp.json()
+                salary_str = None
+                if j.get("salary"):
+                    sal = j["salary"]
+                    if isinstance(sal, dict):
+                        parts = []
+                        if sal.get("min_value"):
+                            parts.append(f"${sal['min_value']:,.0f}")
+                        if sal.get("max_value"):
+                            parts.append(f"${sal['max_value']:,.0f}")
+                        salary_str = " – ".join(parts) if parts else sal.get("string")
+                    elif isinstance(sal, str):
+                        salary_str = sal
+                sample_rows.append({
+                    "title": j.get("title", ""),
+                    "company": j.get("company_name", ""),
+                    "location": j.get("location", ""),
+                    "salary": salary_str,
+                    "employment_type": j.get("employment_type", ""),
+                    "time_posted": j.get("time_posted", ""),
+                })
         except Exception:
             continue
 
-    if not jobs:
-        return None
-
-    # Parse into DataFrame
-    rows = []
-    for j in jobs:
-        salary_str = None
-        if j.get("salary"):
-            sal = j["salary"]
-            if isinstance(sal, dict):
-                parts = []
-                if sal.get("min_value"):
-                    parts.append(f"${sal['min_value']:,.0f}")
-                if sal.get("max_value"):
-                    parts.append(f"${sal['max_value']:,.0f}")
-                salary_str = " – ".join(parts) if parts else sal.get("string")
-            elif isinstance(sal, str):
-                salary_str = sal
-
-        industries = ""
-        if j.get("job_industry_collection"):
-            industry_items = j["job_industry_collection"]
-            if isinstance(industry_items, list):
-                industries = ", ".join(
-                    item.get("job_industry_list", {}).get("industry", "")
-                    for item in industry_items
-                    if isinstance(item, dict)
-                )
-
-        rows.append({
-            "title": j.get("title", ""),
-            "company": j.get("company_name", ""),
-            "location": j.get("location", ""),
-            "salary": salary_str,
-            "employment_type": j.get("employment_type", ""),
-            "industry": industries,
-            "time_posted": j.get("time_posted", ""),
-        })
-
-    df = pd.DataFrame(rows)
+    sample_df = pd.DataFrame(sample_rows) if sample_rows else pd.DataFrame()
 
     return {
-        "total_postings": total_postings,
-        "jobs_df": df,
+        "trend_df": trend_df,
+        "current_active": current_active,
         "search_titles": search_titles,
+        "sample_df": sample_df,
     }
 
 
@@ -3354,11 +3393,11 @@ def main():
                 )
 
 
-    # ── Active Job Postings (Coresignal) ─────────────────────────────────────
+    # ── Job Posting Trends (Coresignal) ──────────────────────────────────────
     st.divider()
-    st.subheader("Active Job Postings")
+    st.subheader("Job Posting Trends")
     st.caption(
-        "Live job postings for occupations related to the selected program(s) "
+        "Monthly new job postings for occupations related to the selected program(s) "
         "| Source: Coresignal Base Jobs API"
     )
 
@@ -3366,16 +3405,16 @@ def main():
     if not _cs_api_key:
         st.info(
             "Coresignal API key not configured. Add a `[coresignal]` section with "
-            "`api_key` to `.streamlit/secrets.toml` to enable live job postings."
+            "`api_key` to `.streamlit/secrets.toml` to enable job posting trends."
         )
     elif all_cips:
         st.info(
-            "Job postings data is shown when specific CIP code(s) are selected. "
-            "Deselect **All CIP codes** and choose program(s) to see active postings."
+            "Job posting data is shown when specific CIP code(s) are selected. "
+            "Deselect **All CIP codes** and choose program(s) to see posting trends."
         )
     else:
-        with st.spinner("Querying live job postings..."):
-            cs_data = run_coresignal_query(
+        with st.spinner("Querying job posting trends..."):
+            cs_data = run_coresignal_trend(
                 cip_patterns=cip_patterns,
                 awlevels=selected_awlevels,
                 geo_key=geo_key,
@@ -3383,103 +3422,128 @@ def main():
             )
 
         if cs_data is None:
-            st.info("No active job postings found for the selected program(s) and geography.")
+            st.info("No job posting data found for the selected program(s) and geography.")
         else:
-            cs_total = cs_data["total_postings"]
-            cs_df = cs_data["jobs_df"]
+            trend_df = cs_data["trend_df"]
+            current_active = cs_data["current_active"]
             cs_titles = cs_data["search_titles"]
+            sample_df = cs_data["sample_df"]
 
             # ── Metrics row ──────────────────────────────────────────────
             mc1, mc2, mc3 = st.columns(3)
-            mc1.metric("Active Postings Found", f"{cs_total:,}")
+            mc1.metric("Currently Active Postings", f"{current_active:,}")
 
-            if not cs_df.empty and "company" in cs_df.columns:
-                top_employer = cs_df["company"].value_counts().idxmax()
-                mc2.metric("Top Employer (sample)", top_employer)
+            latest_month = trend_df["postings"].iloc[-1]
+            mc2.metric("New Postings (latest month)", f"{latest_month:,}")
 
-            salaries = []
-            for s in cs_df["salary"].dropna():
-                if not s:
-                    continue
-                nums = re.findall(r"[\d,]+", s.replace(",", ""))
-                for n in nums:
-                    try:
-                        val = float(n)
-                        if val > 1000:
-                            salaries.append(val)
-                    except ValueError:
-                        pass
-            if salaries:
-                median_sal = sorted(salaries)[len(salaries) // 2]
-                mc3.metric("Median Salary (sample)", f"${median_sal:,.0f}")
+            # 3-month vs prior 3-month change
+            if len(trend_df) >= 6:
+                recent_3 = trend_df["postings"].iloc[-3:].sum()
+                prior_3 = trend_df["postings"].iloc[-6:-3].sum()
+                if prior_3 > 0:
+                    qoq_change = (recent_3 - prior_3) / prior_3
+                    mc3.metric(
+                        "3-Month Change",
+                        f"{qoq_change:+.1%}",
+                        delta=f"{qoq_change:+.1%}",
+                    )
 
-            # ── Top employers bar chart ──────────────────────────────────
-            if not cs_df.empty and cs_df["company"].notna().any():
-                emp_counts = (
-                    cs_df["company"]
-                    .value_counts()
-                    .head(10)
-                    .reset_index()
-                )
-                emp_counts.columns = ["Employer", "Postings"]
-                fig_emp = px.bar(
-                    emp_counts,
-                    x="Postings",
-                    y="Employer",
-                    orientation="h",
-                    color_discrete_sequence=["#f26822"],
-                )
-                fig_emp.update_layout(
-                    title=dict(text="Top Employers by Posting Count", font=dict(size=13), x=0, xanchor="left"),
-                    height=max(250, len(emp_counts) * 30 + 80),
-                    margin=dict(t=40, b=30, l=10, r=20),
-                    plot_bgcolor="white",
-                    paper_bgcolor="white",
-                    font=dict(family="Montserrat, Arial, sans-serif", size=12, color="#333333"),
-                    yaxis=dict(autorange="reversed"),
-                    showlegend=False,
-                )
-                st.plotly_chart(fig_emp, use_container_width=True)
+            # ── Trend line chart ─────────────────────────────────────────
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(
+                x=trend_df["month"],
+                y=trend_df["postings"],
+                mode="lines+markers",
+                line=dict(color="#f26822", width=3),
+                marker=dict(size=7, color="#f26822"),
+                hovertemplate="%{x}<br>%{y:,.0f} postings<extra></extra>",
+            ))
+            fig_trend.update_layout(
+                title=dict(
+                    text="New Job Postings per Month",
+                    font=dict(size=13),
+                    x=0,
+                    xanchor="left",
+                ),
+                height=350,
+                margin=dict(t=40, b=60, l=70, r=20),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(family="Montserrat, Arial, sans-serif", size=12, color="#333333"),
+                xaxis=dict(
+                    title="Month",
+                    tickangle=-45,
+                    showgrid=True,
+                    gridcolor="#F3F4F6",
+                    gridwidth=1,
+                ),
+                yaxis=dict(
+                    title="Postings",
+                    showgrid=True,
+                    gridcolor="#F3F4F6",
+                    gridwidth=1,
+                    rangemode="tozero",
+                ),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_trend, use_container_width=True)
 
-            # ── Top locations bar chart ──────────────────────────────────
-            if not cs_df.empty and cs_df["location"].notna().any():
-                loc_counts = (
-                    cs_df["location"]
-                    .value_counts()
-                    .head(10)
-                    .reset_index()
-                )
-                loc_counts.columns = ["Location", "Postings"]
-                fig_loc = px.bar(
-                    loc_counts,
-                    x="Postings",
-                    y="Location",
-                    orientation="h",
-                    color_discrete_sequence=["#0f86c1"],
-                )
-                fig_loc.update_layout(
-                    title=dict(text="Top Locations by Posting Count", font=dict(size=13), x=0, xanchor="left"),
-                    height=max(250, len(loc_counts) * 30 + 80),
-                    margin=dict(t=40, b=30, l=10, r=20),
-                    plot_bgcolor="white",
-                    paper_bgcolor="white",
-                    font=dict(family="Montserrat, Arial, sans-serif", size=12, color="#333333"),
-                    yaxis=dict(autorange="reversed"),
-                    showlegend=False,
-                )
-                st.plotly_chart(fig_loc, use_container_width=True)
+            # ── YoY % change bar chart (if we have 12+ months) ──────────
+            if len(trend_df) >= 2:
+                trend_df_yoy = trend_df.copy()
+                trend_df_yoy["pct_change"] = trend_df_yoy["postings"].pct_change() * 100
+                trend_df_yoy = trend_df_yoy.dropna(subset=["pct_change"])
 
-            # ── Sample job postings table ────────────────────────────────
-            display_cols = ["title", "company", "location", "salary", "employment_type", "time_posted"]
-            display_df = cs_df[[c for c in display_cols if c in cs_df.columns]].copy()
-            display_df.columns = [c.replace("_", " ").title() for c in display_df.columns]
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+                if not trend_df_yoy.empty:
+                    colors = [
+                        "#0f86c1" if v >= 0 else "#E74C3C"
+                        for v in trend_df_yoy["pct_change"]
+                    ]
+                    fig_yoy = go.Figure(go.Bar(
+                        x=trend_df_yoy["month"],
+                        y=trend_df_yoy["pct_change"],
+                        marker_color=colors,
+                        hovertemplate="%{x}<br>%{y:+.1f}%<extra></extra>",
+                    ))
+                    fig_yoy.update_layout(
+                        title=dict(
+                            text="Month-over-Month % Change",
+                            font=dict(size=13),
+                            x=0,
+                            xanchor="left",
+                        ),
+                        height=220,
+                        margin=dict(t=40, b=60, l=70, r=20),
+                        plot_bgcolor="white",
+                        paper_bgcolor="white",
+                        font=dict(family="Montserrat, Arial, sans-serif", size=12, color="#333333"),
+                        xaxis=dict(tickangle=-45, showgrid=True, gridcolor="#F3F4F6"),
+                        yaxis=dict(
+                            ticksuffix="%",
+                            tickformat=".0f",
+                            showgrid=True,
+                            gridcolor="#F3F4F6",
+                            zeroline=True,
+                            zerolinecolor="#999999",
+                            zerolinewidth=1,
+                        ),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig_yoy, use_container_width=True)
 
-            # ── Caption with search titles used ──────────────────────────
+            # ── Sample recent postings table ─────────────────────────────
+            if not sample_df.empty:
+                st.markdown("**Recent Postings (sample)**")
+                display_cols = ["title", "company", "location", "salary", "employment_type", "time_posted"]
+                display_df = sample_df[[c for c in display_cols if c in sample_df.columns]].copy()
+                display_df.columns = [c.replace("_", " ").title() for c in display_df.columns]
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+            # ── Caption ──────────────────────────────────────────────────
             titles_str = ", ".join(f"**{t}**" for t in cs_titles)
             st.caption(
-                f"Searched {cs_total:,} active postings across occupation titles: {titles_str}. "
-                f"Showing details for a sample of {len(cs_df)} postings. "
+                f"Occupation titles searched: {titles_str}. "
+                f"Monthly counts reflect new postings created in each month (not cumulative). "
                 f"Data refreshes hourly."
             )
 
