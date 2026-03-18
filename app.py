@@ -3482,14 +3482,6 @@ def main():
                     )
                     st.plotly_chart(fig_yoy, use_container_width=True)
 
-            # ── Sample recent postings table ─────────────────────────────
-            if not sample_df.empty:
-                st.markdown("**Recent Postings (sample)**")
-                display_cols = ["title", "company", "location", "salary", "employment_type", "time_posted"]
-                display_df = sample_df[[c for c in display_cols if c in sample_df.columns]].copy()
-                display_df.columns = [c.replace("_", " ").title() for c in display_df.columns]
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
-
             # ── Caption ──────────────────────────────────────────────────
             titles_str = ", ".join(f"**{t}**" for t in cs_titles)
             st.caption(
