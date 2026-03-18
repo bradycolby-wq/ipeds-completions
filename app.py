@@ -3,6 +3,7 @@ IPEDS Completions Explorer
 Streamlit app — academic years 2014-15 through 2023-24
 """
 
+import re
 import sqlite3
 import urllib.request
 from pathlib import Path
@@ -11,6 +12,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests as _requests
 from plotly.subplots import make_subplots
 import streamlit as st
 
@@ -824,6 +826,172 @@ def run_distance_ed_query(
     return {
         "de_program_counts": dict(zip(df["year"], df["de_program_count"])),
         "de_completions": dict(zip(df["year"], df["de_completions"])),
+    }
+
+
+_CORESIGNAL_BASE = "https://api.coresignal.com/cdapi/v2/job_base"
+
+# Generic SOC titles to exclude from Coresignal searches (too broad / noisy)
+_GENERIC_SOC_TITLES = {
+    "Managers, All Other",
+    "Teachers and Instructors, All Other, Except Substitute Teachers",
+    "First-Line Supervisors of Office and Administrative Support Workers",
+    "Postsecondary Teachers",
+    "Education Administrators, Postsecondary",
+    "Education Administrators, All Other",
+}
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def run_coresignal_query(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    geo_key: str,
+    geo_values: tuple,
+):
+    """Query Coresignal Base Jobs API for active postings related to selected CIP codes.
+
+    Uses the CIP-SOC crosswalk to map programs to occupation titles, then searches
+    Coresignal for active job postings matching those titles.
+
+    Returns dict with 'total_postings', 'jobs_df', and 'search_titles',
+    or None if the API key is missing or no results found.
+    """
+    api_key = st.secrets.get("coresignal", {}).get("api_key", "")
+    if not api_key:
+        return None
+
+    cip_patterns = expand_cip_patterns(cip_patterns)
+
+    # Look up occupation titles from CIP-SOC crosswalk
+    conn = get_conn()
+    try:
+        conn.execute("SELECT 1 FROM cip_soc_crosswalk LIMIT 1")
+    except Exception:
+        conn.close()
+        return None
+
+    params = []
+    cip_clauses = []
+    for p in cip_patterns:
+        cip_clauses.append("cipcode LIKE ?" if "%" in p else "cipcode = ?")
+        params.append(p)
+
+    awlevel_filter = ""
+    if awlevels:
+        undergrad = any(a in (1, 2, 3, 4, 5) for a in awlevels)
+        grad = any(a in (6, 7, 8, 17, 18, 19) for a in awlevels)
+        if undergrad and not grad:
+            awlevel_filter = "AND awlevel_group = 'undergrad'"
+        elif grad and not undergrad:
+            awlevel_filter = "AND awlevel_group = 'graduate'"
+
+    sql = f"""
+        SELECT DISTINCT soc_title
+        FROM cip_soc_crosswalk
+        WHERE ({' OR '.join(cip_clauses)}) {awlevel_filter}
+        ORDER BY soc_title
+    """
+    soc_titles = [r[0] for r in conn.execute(sql, params).fetchall()]
+    conn.close()
+
+    # Filter out generic titles and simplify for Coresignal title search
+    soc_titles = [t for t in soc_titles if t not in _GENERIC_SOC_TITLES]
+    # Drop comma qualifiers ("Nurse Anesthetists, Certified" → "Nurse Anesthetists")
+    # and strip trailing plural "s" for better Coresignal matching
+    simplified = []
+    for t in soc_titles:
+        t = t.split(",")[0].strip()
+        if t.endswith("s") and not t.endswith("ss"):
+            t = t[:-1]
+        if t and t not in simplified:
+            simplified.append(t)
+    search_titles = simplified[:3]
+
+    if not search_titles:
+        return None
+
+    headers = {"accept": "application/json", "apikey": api_key, "Content-Type": "application/json"}
+    session = _requests.Session()
+    session.headers.update(headers)
+
+    # Search for job IDs across all selected occupation titles
+    all_ids = set()
+    for title in search_titles:
+        body = {"title": title, "country": "United States", "application_active": True}
+        if geo_key == "state" and geo_values:
+            # Coresignal accepts full state names; convert abbreviations
+            body["location"] = geo_values[0]  # use first state as location hint
+        try:
+            resp = session.post(f"{_CORESIGNAL_BASE}/search/filter", json=body, timeout=30)
+            if resp.status_code == 200:
+                ids = resp.json()
+                if isinstance(ids, list):
+                    all_ids.update(ids)
+        except Exception:
+            continue
+
+    if not all_ids:
+        return None
+
+    total_postings = len(all_ids)
+
+    # Collect details for a sample of up to 50 jobs
+    sample_ids = list(all_ids)[:50]
+    jobs = []
+    for jid in sample_ids:
+        try:
+            resp = session.get(f"{_CORESIGNAL_BASE}/collect/{jid}", timeout=15)
+            if resp.status_code == 200:
+                jobs.append(resp.json())
+        except Exception:
+            continue
+
+    if not jobs:
+        return None
+
+    # Parse into DataFrame
+    rows = []
+    for j in jobs:
+        salary_str = None
+        if j.get("salary"):
+            sal = j["salary"]
+            if isinstance(sal, dict):
+                parts = []
+                if sal.get("min_value"):
+                    parts.append(f"${sal['min_value']:,.0f}")
+                if sal.get("max_value"):
+                    parts.append(f"${sal['max_value']:,.0f}")
+                salary_str = " – ".join(parts) if parts else sal.get("string")
+            elif isinstance(sal, str):
+                salary_str = sal
+
+        industries = ""
+        if j.get("job_industry_collection"):
+            industry_items = j["job_industry_collection"]
+            if isinstance(industry_items, list):
+                industries = ", ".join(
+                    item.get("job_industry_list", {}).get("industry", "")
+                    for item in industry_items
+                    if isinstance(item, dict)
+                )
+
+        rows.append({
+            "title": j.get("title", ""),
+            "company": j.get("company_name", ""),
+            "location": j.get("location", ""),
+            "salary": salary_str,
+            "employment_type": j.get("employment_type", ""),
+            "industry": industries,
+            "time_posted": j.get("time_posted", ""),
+        })
+
+    df = pd.DataFrame(rows)
+
+    return {
+        "total_postings": total_postings,
+        "jobs_df": df,
+        "search_titles": search_titles,
     }
 
 
@@ -3184,6 +3352,136 @@ def main():
                     f"Aggregate includes **{len(occ_list)}** related occupations "
                     f"(SOC codes mapped via CIP-SOC crosswalk):  \n{occ_bullets}"
                 )
+
+
+    # ── Active Job Postings (Coresignal) ─────────────────────────────────────
+    st.divider()
+    st.subheader("Active Job Postings")
+    st.caption(
+        "Live job postings for occupations related to the selected program(s) "
+        "| Source: Coresignal Base Jobs API"
+    )
+
+    _cs_api_key = st.secrets.get("coresignal", {}).get("api_key", "")
+    if not _cs_api_key:
+        st.info(
+            "Coresignal API key not configured. Add a `[coresignal]` section with "
+            "`api_key` to `.streamlit/secrets.toml` to enable live job postings."
+        )
+    elif all_cips:
+        st.info(
+            "Job postings data is shown when specific CIP code(s) are selected. "
+            "Deselect **All CIP codes** and choose program(s) to see active postings."
+        )
+    else:
+        with st.spinner("Querying live job postings..."):
+            cs_data = run_coresignal_query(
+                cip_patterns=cip_patterns,
+                awlevels=selected_awlevels,
+                geo_key=geo_key,
+                geo_values=tuple(geo_values),
+            )
+
+        if cs_data is None:
+            st.info("No active job postings found for the selected program(s) and geography.")
+        else:
+            cs_total = cs_data["total_postings"]
+            cs_df = cs_data["jobs_df"]
+            cs_titles = cs_data["search_titles"]
+
+            # ── Metrics row ──────────────────────────────────────────────
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Active Postings Found", f"{cs_total:,}")
+
+            if not cs_df.empty and "company" in cs_df.columns:
+                top_employer = cs_df["company"].value_counts().idxmax()
+                mc2.metric("Top Employer (sample)", top_employer)
+
+            salaries = []
+            for s in cs_df["salary"].dropna():
+                if not s:
+                    continue
+                nums = re.findall(r"[\d,]+", s.replace(",", ""))
+                for n in nums:
+                    try:
+                        val = float(n)
+                        if val > 1000:
+                            salaries.append(val)
+                    except ValueError:
+                        pass
+            if salaries:
+                median_sal = sorted(salaries)[len(salaries) // 2]
+                mc3.metric("Median Salary (sample)", f"${median_sal:,.0f}")
+
+            # ── Top employers bar chart ──────────────────────────────────
+            if not cs_df.empty and cs_df["company"].notna().any():
+                emp_counts = (
+                    cs_df["company"]
+                    .value_counts()
+                    .head(10)
+                    .reset_index()
+                )
+                emp_counts.columns = ["Employer", "Postings"]
+                fig_emp = px.bar(
+                    emp_counts,
+                    x="Postings",
+                    y="Employer",
+                    orientation="h",
+                    color_discrete_sequence=["#f26822"],
+                )
+                fig_emp.update_layout(
+                    title=dict(text="Top Employers by Posting Count", font=dict(size=13), x=0, xanchor="left"),
+                    height=max(250, len(emp_counts) * 30 + 80),
+                    margin=dict(t=40, b=30, l=10, r=20),
+                    plot_bgcolor="white",
+                    paper_bgcolor="white",
+                    font=dict(family="Montserrat, Arial, sans-serif", size=12, color="#333333"),
+                    yaxis=dict(autorange="reversed"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_emp, use_container_width=True)
+
+            # ── Top locations bar chart ──────────────────────────────────
+            if not cs_df.empty and cs_df["location"].notna().any():
+                loc_counts = (
+                    cs_df["location"]
+                    .value_counts()
+                    .head(10)
+                    .reset_index()
+                )
+                loc_counts.columns = ["Location", "Postings"]
+                fig_loc = px.bar(
+                    loc_counts,
+                    x="Postings",
+                    y="Location",
+                    orientation="h",
+                    color_discrete_sequence=["#0f86c1"],
+                )
+                fig_loc.update_layout(
+                    title=dict(text="Top Locations by Posting Count", font=dict(size=13), x=0, xanchor="left"),
+                    height=max(250, len(loc_counts) * 30 + 80),
+                    margin=dict(t=40, b=30, l=10, r=20),
+                    plot_bgcolor="white",
+                    paper_bgcolor="white",
+                    font=dict(family="Montserrat, Arial, sans-serif", size=12, color="#333333"),
+                    yaxis=dict(autorange="reversed"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_loc, use_container_width=True)
+
+            # ── Sample job postings table ────────────────────────────────
+            display_cols = ["title", "company", "location", "salary", "employment_type", "time_posted"]
+            display_df = cs_df[[c for c in display_cols if c in cs_df.columns]].copy()
+            display_df.columns = [c.replace("_", " ").title() for c in display_df.columns]
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+            # ── Caption with search titles used ──────────────────────────
+            titles_str = ", ".join(f"**{t}**" for t in cs_titles)
+            st.caption(
+                f"Searched {cs_total:,} active postings across occupation titles: {titles_str}. "
+                f"Showing details for a sample of {len(cs_df)} postings. "
+                f"Data refreshes hourly."
+            )
 
 
 if __name__ == "__main__":
