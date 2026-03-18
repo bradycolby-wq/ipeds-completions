@@ -26,7 +26,7 @@ except ImportError:
 # GitHub Release URL for the database (used on Streamlit Community Cloud)
 _GITHUB_DB_URL = (
     "https://github.com/bradycolby-wq/ipeds-completions/releases/"
-    "download/v1.3/ipeds.db"
+    "download/v1.4/ipeds.db"
 )
 
 
@@ -898,7 +898,7 @@ def run_coresignal_trend(
     paginating (1 credit per month per title). Also collects a small sample
     of recent postings for a detail table.
 
-    Returns dict with 'trend_df', 'current_active', 'search_titles', 'sample_df',
+    Returns dict with 'trend_df', 'current_active', and 'search_titles',
     or None if the API key is missing or no results found.
     """
     from datetime import datetime, timedelta
@@ -980,57 +980,10 @@ def run_coresignal_trend(
         except Exception:
             continue
 
-    # Collect a small sample of recent postings for the detail table
-    sample_ids = []
-    for title in search_titles[:1]:  # just first title to save credits
-        body = {"title": title, "country": "United States", "application_active": True}
-        if geo_key == "state" and geo_values:
-            body["location"] = geo_values[0]
-        try:
-            resp = session.post(f"{_CORESIGNAL_BASE}/search/filter", json=body, timeout=30)
-            if resp.status_code == 200:
-                ids = resp.json()
-                if isinstance(ids, list):
-                    sample_ids = ids[:20]
-        except Exception:
-            pass
-
-    sample_rows = []
-    for jid in sample_ids:
-        try:
-            resp = session.get(f"{_CORESIGNAL_BASE}/collect/{jid}", timeout=15)
-            if resp.status_code == 200:
-                j = resp.json()
-                salary_str = None
-                if j.get("salary"):
-                    sal = j["salary"]
-                    if isinstance(sal, dict):
-                        parts = []
-                        if sal.get("min_value"):
-                            parts.append(f"${sal['min_value']:,.0f}")
-                        if sal.get("max_value"):
-                            parts.append(f"${sal['max_value']:,.0f}")
-                        salary_str = " – ".join(parts) if parts else sal.get("string")
-                    elif isinstance(sal, str):
-                        salary_str = sal
-                sample_rows.append({
-                    "title": j.get("title", ""),
-                    "company": j.get("company_name", ""),
-                    "location": j.get("location", ""),
-                    "salary": salary_str,
-                    "employment_type": j.get("employment_type", ""),
-                    "time_posted": j.get("time_posted", ""),
-                })
-        except Exception:
-            continue
-
-    sample_df = pd.DataFrame(sample_rows) if sample_rows else pd.DataFrame()
-
     return {
         "trend_df": trend_df,
         "current_active": current_active,
         "search_titles": search_titles,
-        "sample_df": sample_df,
     }
 
 
@@ -3427,8 +3380,6 @@ def main():
             trend_df = cs_data["trend_df"]
             current_active = cs_data["current_active"]
             cs_titles = cs_data["search_titles"]
-            sample_df = cs_data["sample_df"]
-
             # ── Metrics row ──────────────────────────────────────────────
             mc1, mc2, mc3 = st.columns(3)
             mc1.metric("Currently Active Postings", f"{current_active:,}")
