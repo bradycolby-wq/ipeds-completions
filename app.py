@@ -39,10 +39,16 @@ def _get_db_path() -> Path:
     cache_dir = Path.home() / ".cache" / "ipeds"
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached = cache_dir / "ipeds.db"
+    version_file = cache_dir / "db_version.txt"
 
-    if not cached.exists():
+    # Re-download when the release URL changes (new version uploaded)
+    current_version = _GITHUB_DB_URL
+    cached_version = version_file.read_text().strip() if version_file.exists() else ""
+
+    if not cached.exists() or cached_version != current_version:
         with st.spinner("Downloading database (~600 MB) — this takes ~60 seconds on first launch..."):
             urllib.request.urlretrieve(_GITHUB_DB_URL, cached)
+            version_file.write_text(current_version)
 
     return cached
 
