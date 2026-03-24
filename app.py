@@ -749,7 +749,10 @@ def run_distance_ed_query(
 
     Joins completions with distance_ed_status (from IPEDS IC survey) on
     (year, unitid) to identify institutions offering distance education
-    (distnced IN (1, 2) = all or some programs offered via DE).
+    EXCLUSIVELY (distnced = 1).  Using distnced IN (1, 2) captured nearly
+    every institution (since almost all offer *some* DE), which made
+    DE completions ≈ total completions (~100%) regardless of filters.
+
     Only includes programs with at least 1 completion (ctotalt > 0).
 
     Returns dict with 'de_program_counts' and 'de_completions' keyed by year,
@@ -771,7 +774,7 @@ def run_distance_ed_query(
         "c.majornum = 1",
         "c.ctotalt IS NOT NULL",
         "c.ctotalt > 0",
-        "d.distnced IN (1, 2)",
+        "d.distnced = 1",
     ]
 
     if cip_patterns:
@@ -904,7 +907,7 @@ def run_coresignal_trend(
     from datetime import datetime, timedelta
     import calendar
 
-    api_key = st.secrets.get("coresignal", {}).get("api_key", "")
+    api_key = st.secrets["coresignal"]["api_key"] if "coresignal" in st.secrets else ""
     if not api_key:
         return None
 
@@ -917,6 +920,38 @@ def run_coresignal_trend(
     session = _requests.Session()
     session.headers.update(headers)
 
+    # Resolve geography to Coresignal-compatible location strings.
+    # States: use abbreviations directly (e.g., "TX"). Metro filtering not supported.
+    cs_locations = []  # empty = national (no location filter)
+    if geo_key == "state" and geo_values:
+        cs_locations = list(geo_values)
+
+    def _search_total(body: dict) -> int:
+        """Run a search/filter call and return estimated total from headers."""
+        try:
+            resp = session.post(
+                f"{_CORESIGNAL_BASE}/search/filter", json=body, timeout=30
+            )
+            if resp.status_code == 200:
+                total_pages = int(resp.headers.get("x-total-pages", 1))
+                items_per_page = int(resp.headers.get("x-items-per-page", 1000))
+                return total_pages * items_per_page
+        except Exception:
+            pass
+        return 0
+
+    def _query_postings(extra_filters: dict) -> int:
+        """Sum posting counts across all search titles and locations."""
+        total = 0
+        locs = cs_locations or [None]  # None = no location filter
+        for title in search_titles:
+            for loc in locs:
+                body = {"title": title, "country": "United States", **extra_filters}
+                if loc is not None:
+                    body["location"] = loc
+                total += _search_total(body)
+        return total
+
     # Build list of last 12 months
     today = datetime.now()
     months = []
@@ -924,61 +959,29 @@ def run_coresignal_trend(
         dt = today.replace(day=1) - timedelta(days=i * 30)
         dt = dt.replace(day=1)
         last_day = calendar.monthrange(dt.year, dt.month)[1]
-        # For current month, cap at today
-        if dt.year == today.year and dt.month == today.month:
-            end_day = today.day
-        else:
-            end_day = last_day
+        end_day = today.day if (dt.year == today.year and dt.month == today.month) else last_day
         months.append({
             "label": dt.strftime("%Y-%m"),
             "gte": f"{dt.year}-{dt.month:02d}-01 00:00:00",
             "lte": f"{dt.year}-{dt.month:02d}-{end_day:02d} 23:59:59",
         })
 
-    # Query posting counts per month (aggregate across all search titles)
+    # Query posting counts per month
     trend_rows = []
     for m in months:
-        month_total = 0
-        for title in search_titles:
-            body = {
-                "title": title,
-                "country": "United States",
-                "created_at_gte": m["gte"],
-                "created_at_lte": m["lte"],
-            }
-            if geo_key == "state" and geo_values:
-                body["location"] = geo_values[0]
-            try:
-                resp = session.post(
-                    f"{_CORESIGNAL_BASE}/search/filter", json=body, timeout=30
-                )
-                if resp.status_code == 200:
-                    total_pages = int(resp.headers.get("x-total-pages", 1))
-                    items_per_page = int(resp.headers.get("x-items-per-page", 1000))
-                    month_total += total_pages * items_per_page
-            except Exception:
-                continue
+        month_total = _query_postings({
+            "created_at_gte": m["gte"],
+            "created_at_lte": m["lte"],
+        })
         trend_rows.append({"month": m["label"], "postings": month_total})
 
     trend_df = pd.DataFrame(trend_rows)
 
     if trend_df["postings"].sum() == 0:
-        return None
+        return "empty"
 
     # Get current active postings count
-    current_active = 0
-    for title in search_titles:
-        body = {"title": title, "country": "United States", "application_active": True}
-        if geo_key == "state" and geo_values:
-            body["location"] = geo_values[0]
-        try:
-            resp = session.post(f"{_CORESIGNAL_BASE}/search/filter", json=body, timeout=30)
-            if resp.status_code == 200:
-                total_pages = int(resp.headers.get("x-total-pages", 1))
-                items_per_page = int(resp.headers.get("x-items-per-page", 1000))
-                current_active += total_pages * items_per_page
-        except Exception:
-            continue
+    current_active = _query_postings({"application_active": True})
 
     return {
         "trend_df": trend_df,
@@ -1632,6 +1635,139 @@ def run_google_trends_query(
         "top_metros": df_metros,
         "per_cip_time": df_per_cip,
     }
+
+
+# ── MiroFish Swarm Intelligence helpers ───────────────────────────────────────
+
+def _mf_base_url() -> str:
+    """Return configured MiroFish API base URL."""
+    try:
+        return st.secrets["mirofish"]["base_url"].rstrip("/")
+    except (KeyError, FileNotFoundError):
+        return ""
+
+
+def _mf_post(path: str, json_body: dict | None = None, files=None, timeout: int = 120):
+    """POST to MiroFish API; returns parsed JSON or raises."""
+    url = f"{_mf_base_url()}{path}"
+    resp = _requests.post(url, json=json_body, files=files, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _mf_get(path: str, params: dict | None = None, timeout: int = 60):
+    """GET from MiroFish API; returns parsed JSON or raises."""
+    url = f"{_mf_base_url()}{path}"
+    resp = _requests.get(url, params=params, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _mf_build_seed_document(
+    cip_labels: list[str],
+    awlevel_labels: list[str],
+    trend_df: pd.DataFrame | None,
+    inst_df: pd.DataFrame | None,
+) -> str:
+    """Build a Markdown seed document for MiroFish from the current program context."""
+    lines = ["# Degree Program Performance Data\n"]
+
+    # Program identity
+    lines.append("## Selected Programs\n")
+    for label in cip_labels:
+        lines.append(f"- {label}")
+    lines.append("")
+
+    if awlevel_labels:
+        lines.append("## Award Levels\n")
+        for lbl in awlevel_labels:
+            lines.append(f"- {lbl}")
+        lines.append("")
+
+    # Historical completions trend
+    if trend_df is not None and not trend_df.empty:
+        lines.append("## Historical Completions Trend\n")
+        lines.append("| Academic Year | Total Completions |")
+        lines.append("|---|---|")
+        for _, row in trend_df.iterrows():
+            lines.append(f"| {int(row['year'])} | {int(row['completions']):,} |")
+        lines.append("")
+
+        # Calculate CAGR
+        if len(trend_df) >= 2:
+            first_val = trend_df.iloc[0]["completions"]
+            last_val = trend_df.iloc[-1]["completions"]
+            n_years = trend_df.iloc[-1]["year"] - trend_df.iloc[0]["year"]
+            if first_val > 0 and n_years > 0:
+                cagr = ((last_val / first_val) ** (1 / n_years) - 1) * 100
+                lines.append(f"Compound annual growth rate (CAGR): {cagr:+.1f}%\n")
+
+    # Top institutions
+    if inst_df is not None and not inst_df.empty:
+        latest_year = inst_df["year"].max()
+        top = (
+            inst_df[inst_df["year"] == latest_year]
+            .nlargest(20, "completions")
+        )
+        if not top.empty:
+            lines.append("## Top Institutions (Most Recent Year)\n")
+            lines.append("| Institution | State | Completions |")
+            lines.append("|---|---|---|")
+            for _, row in top.iterrows():
+                lines.append(
+                    f"| {row['instnm']} | {row['stabbr']} | {int(row['completions']):,} |"
+                )
+            lines.append("")
+
+    return "\n".join(lines)
+
+
+def _mf_poll_task(task_id: str, label: str = "Processing", max_wait: int = 300) -> dict:
+    """Poll a MiroFish async task until completion or timeout."""
+    import time
+
+    progress_bar = st.progress(0, text=f"{label}...")
+    start = time.time()
+    while time.time() - start < max_wait:
+        status = _mf_get(f"/graph/task/{task_id}")
+        progress = status.get("data", {}).get("progress", 0)
+        state = status.get("data", {}).get("status", "running")
+        progress_bar.progress(min(progress / 100, 1.0), text=f"{label}... {progress}%")
+        if state in ("completed", "complete", "done"):
+            progress_bar.progress(1.0, text=f"{label} — done!")
+            return status
+        if state in ("failed", "error"):
+            progress_bar.empty()
+            st.error(f"Task failed: {status.get('data', {}).get('error', 'Unknown error')}")
+            return status
+        time.sleep(3)
+    progress_bar.empty()
+    st.warning(f"{label} timed out after {max_wait}s.")
+    return {}
+
+
+def _mf_poll_prep(sim_id: str, label: str = "Preparing simulation", max_wait: int = 300) -> dict:
+    """Poll MiroFish simulation preparation status."""
+    import time
+
+    progress_bar = st.progress(0, text=f"{label}...")
+    start = time.time()
+    while time.time() - start < max_wait:
+        status = _mf_post("/simulation/prepare/status", {"simulation_id": sim_id})
+        progress = status.get("data", {}).get("progress", 0)
+        state = status.get("data", {}).get("status", "running")
+        progress_bar.progress(min(progress / 100, 1.0), text=f"{label}... {progress}%")
+        if state in ("completed", "complete", "done"):
+            progress_bar.progress(1.0, text=f"{label} — done!")
+            return status
+        if state in ("failed", "error"):
+            progress_bar.empty()
+            st.error(f"Preparation failed: {status.get('data', {}).get('error', 'Unknown')}")
+            return status
+        time.sleep(3)
+    progress_bar.empty()
+    st.warning(f"{label} timed out after {max_wait}s.")
+    return {}
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -2446,7 +2582,7 @@ def main():
     st.divider()
     st.subheader("Distance Education Programs")
     st.caption(
-        "Institutions offering all or some programs via distance education with ≥1 completion "
+        "Institutions offering programs exclusively via distance education with ≥1 completion "
         "| Source: IPEDS Institutional Characteristics (IC) Survey"
     )
 
@@ -2592,8 +2728,8 @@ def main():
             st.plotly_chart(fig_de, use_container_width=True)
 
             st.caption(
-                "**DE Programs** = institutions offering all or some programs via distance "
-                "education (DISTNCED = 1 or 2) with ≥1 completion in the selected program.  \n"
+                "**DE Programs** = institutions offering programs exclusively via distance "
+                "education (DISTNCED = 1) with ≥1 completion in the selected program.  \n"
                 "**DE Completions** = total completions from those institutions."
             )
 
@@ -3346,35 +3482,42 @@ def main():
                 )
 
 
-    # ── Job Posting Trends (Coresignal) ──────────────────────────────────────
-    st.divider()
-    st.subheader("Job Posting Trends")
-    st.caption(
-        "Monthly new job postings for occupations related to the selected program(s) "
-        "| Source: Coresignal Base Jobs API"
-    )
+    # ── Job Posting Trends (Coresignal) ── admin-only, on-demand ─────────────
+    try:
+        _cs_api_key = st.secrets["coresignal"]["api_key"]
+    except (KeyError, FileNotFoundError):
+        _cs_api_key = ""
 
-    _cs_api_key = st.secrets.get("coresignal", {}).get("api_key", "")
-    if not _cs_api_key:
-        st.info(
-            "Coresignal API key not configured. Add a `[coresignal]` section with "
-            "`api_key` to `.streamlit/secrets.toml` to enable job posting trends."
+    _is_admin = st.user.is_logged_in and st.user.email and st.user.email.lower() == "brady.colby@validatedinsights.com"
+
+    if _cs_api_key and _is_admin:
+        st.divider()
+        st.subheader("Job Posting Trends")
+        st.caption(
+            "Monthly new job postings for occupations related to the selected program(s) "
+            "| Source: Coresignal Base Jobs API"
         )
-    elif all_cips:
+
+    if _cs_api_key and _is_admin and all_cips:
         st.info(
             "Job posting data is shown when specific CIP code(s) are selected. "
             "Deselect **All CIP codes** and choose program(s) to see posting trends."
         )
-    else:
-        with st.spinner("Querying job posting trends..."):
-            cs_data = run_coresignal_trend(
-                cip_patterns=cip_patterns,
-                awlevels=selected_awlevels,
-                geo_key=geo_key,
-                geo_values=tuple(geo_values),
-            )
+    elif _cs_api_key and _is_admin and not all_cips:
+        _cs_key = f"cs_{cip_patterns}_{selected_awlevels}_{geo_key}_{geo_values}"
+        if st.button("Pull Job Posting Trends", key="cs_pull"):
+            with st.spinner("Querying job posting trends (this may take a moment)..."):
+                st.session_state["_cs_data"] = run_coresignal_trend(
+                    cip_patterns=cip_patterns,
+                    awlevels=selected_awlevels,
+                    geo_key=geo_key,
+                    geo_values=tuple(geo_values),
+                )
 
+        cs_data = st.session_state.get("_cs_data")
         if cs_data is None:
+            pass  # no data yet or no results
+        elif cs_data == "empty":
             st.info("No job posting data found for the selected program(s) and geography.")
         else:
             trend_df = cs_data["trend_df"]
@@ -3489,6 +3632,315 @@ def main():
                 f"Monthly counts reflect new postings created in each month (not cumulative). "
                 f"Data refreshes hourly."
             )
+
+
+    # ── MiroFish Swarm Simulation ── admin-only ────────────────────────────────
+    _mf_url = _mf_base_url()
+    if _is_admin:
+        st.divider()
+        st.subheader("Swarm Intelligence — Program Performance Simulation")
+        st.caption(
+            "Multi-agent swarm simulation of future degree program performance "
+            "| Powered by [MiroFish](https://github.com/666ghj/MiroFish)"
+        )
+
+        if not _mf_url:
+            st.warning(
+                "MiroFish service URL is not configured. "
+                "Add `[mirofish]` with `base_url` to your Streamlit secrets."
+            )
+
+        # Build context labels for display
+        _awlevel_labels = [AWARD_LEVELS.get(a, str(a)) for a in selected_awlevels] if selected_awlevels else []
+        _cip_display = selected_cip_labels if selected_cip_labels else ["All CIP codes"]
+
+        with st.expander("Simulation configuration", expanded=True):
+            st.markdown("**Programs to simulate:**")
+            st.write(", ".join(_cip_display))
+
+            sim_col1, sim_col2 = st.columns(2)
+            with sim_col1:
+                mf_requirement = st.text_area(
+                    "Simulation requirement",
+                    value=(
+                        f"Predict the future enrollment and completions performance of "
+                        f"the following degree programs over the next 5 years: "
+                        f"{', '.join(_cip_display)}. "
+                        f"Consider factors such as labor market trends, student demand shifts, "
+                        f"online education growth, demographic changes, and competitive dynamics "
+                        f"among institutions."
+                    ),
+                    height=140,
+                    key="mf_requirement",
+                )
+            with sim_col2:
+                mf_max_rounds = st.slider(
+                    "Simulation rounds",
+                    min_value=5,
+                    max_value=50,
+                    value=15,
+                    step=5,
+                    key="mf_rounds",
+                    help="More rounds = richer emergent behaviors but higher LLM cost.",
+                )
+                mf_platform = st.selectbox(
+                    "Simulation platform",
+                    options=["twitter", "reddit", "parallel"],
+                    index=0,
+                    key="mf_platform",
+                    help="Agent interaction platform. 'parallel' runs both Twitter & Reddit.",
+                )
+
+        # Prepare aggregated trend data for seeding (unsplit by level)
+        _agg_df = (
+            df.groupby("year", as_index=False)["completions"].sum()
+            if df is not None and not df.empty
+            else pd.DataFrame()
+        )
+
+        if all_cips:
+            st.info(
+                "Swarm simulation works best with specific programs selected. "
+                "Deselect **All CIP codes** and choose program(s) to simulate."
+            )
+        elif not _mf_url:
+            pass  # warning already shown above
+        elif st.button("Launch Swarm Simulation", key="mf_launch", type="primary"):
+            try:
+                # ① Build seed document from current program data
+                with st.spinner("Building seed document from program data..."):
+                    seed_md = _mf_build_seed_document(
+                        cip_labels=selected_cip_labels,
+                        awlevel_labels=_awlevel_labels,
+                        trend_df=_agg_df,
+                        inst_df=df_inst,
+                    )
+                    st.session_state["_mf_seed"] = seed_md
+
+                # ② Create project & generate ontology
+                with st.spinner("Creating MiroFish project & extracting ontology..."):
+                    import tempfile, os
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".md", delete=False, encoding="utf-8"
+                    ) as tmp:
+                        tmp.write(seed_md)
+                        tmp_path = tmp.name
+
+                    with open(tmp_path, "rb") as f:
+                        onto_resp = _requests.post(
+                            f"{_mf_url}/graph/ontology/generate",
+                            data={"simulation_requirement": mf_requirement},
+                            files={"files": ("program_data.md", f, "text/markdown")},
+                            timeout=180,
+                        ).json()
+                    os.unlink(tmp_path)
+
+                    project_id = onto_resp.get("data", {}).get("project_id")
+                    entity_types = onto_resp.get("data", {}).get("entity_types", [])
+                    if not project_id:
+                        st.error(f"Failed to create project: {onto_resp}")
+                        st.stop()
+
+                    st.session_state["_mf_project_id"] = project_id
+
+                # ③ Build knowledge graph
+                with st.spinner("Building knowledge graph..."):
+                    build_resp = _mf_post("/graph/build", {"project_id": project_id})
+                    build_task_id = build_resp.get("data", {}).get("task_id")
+                    if build_task_id:
+                        task_result = _mf_poll_task(build_task_id, "Building knowledge graph")
+                        graph_id = task_result.get("data", {}).get("graph_id", "")
+                    else:
+                        graph_id = build_resp.get("data", {}).get("graph_id", "")
+
+                # ④ Create simulation
+                with st.spinner("Creating simulation..."):
+                    sim_resp = _mf_post("/simulation/create", {
+                        "project_id": project_id,
+                        "graph_id": graph_id,
+                    })
+                    sim_id = sim_resp.get("data", {}).get("simulation_id")
+                    if not sim_id:
+                        st.error(f"Failed to create simulation: {sim_resp}")
+                        st.stop()
+
+                    st.session_state["_mf_sim_id"] = sim_id
+
+                # ⑤ Prepare simulation (generate agent profiles)
+                with st.spinner("Generating agent profiles..."):
+                    _mf_post("/simulation/prepare", {
+                        "simulation_id": sim_id,
+                        "entity_types": entity_types,
+                    })
+                    _mf_poll_prep(sim_id, "Preparing agent profiles")
+
+                # ⑥ Start simulation
+                with st.spinner("Running swarm simulation..."):
+                    _mf_post("/simulation/start", {
+                        "simulation_id": sim_id,
+                        "platform": mf_platform,
+                        "max_rounds": mf_max_rounds,
+                    })
+
+                    # Poll run status
+                    import time
+                    progress_bar = st.progress(0, text="Simulation running...")
+                    start_time = time.time()
+                    max_sim_wait = mf_max_rounds * 30  # rough estimate
+                    while time.time() - start_time < max_sim_wait:
+                        run_status = _mf_get(f"/simulation/{sim_id}/run-status")
+                        run_data = run_status.get("data", {})
+                        current_round = run_data.get("current_round", 0)
+                        total_rounds = run_data.get("total_rounds", mf_max_rounds)
+                        sim_state = run_data.get("status", "running")
+
+                        pct = current_round / total_rounds if total_rounds > 0 else 0
+                        progress_bar.progress(
+                            min(pct, 1.0),
+                            text=f"Round {current_round}/{total_rounds}..."
+                        )
+
+                        if sim_state in ("completed", "complete", "done"):
+                            progress_bar.progress(1.0, text="Simulation complete!")
+                            break
+                        if sim_state in ("failed", "error"):
+                            progress_bar.empty()
+                            st.error(f"Simulation failed: {run_data.get('error', 'Unknown')}")
+                            st.stop()
+                        time.sleep(5)
+
+                # ⑦ Generate report
+                with st.spinner("Generating prediction report..."):
+                    rpt_resp = _mf_post("/report/generate", {"simulation_id": sim_id})
+                    rpt_task_id = rpt_resp.get("data", {}).get("task_id")
+                    report_id = rpt_resp.get("data", {}).get("report_id", "")
+
+                    if rpt_task_id:
+                        rpt_result = _mf_poll_task(rpt_task_id, "Generating report", max_wait=180)
+                        report_id = report_id or rpt_result.get("data", {}).get("report_id", "")
+
+                    if report_id:
+                        report_data = _mf_get(f"/report/{report_id}")
+                        report_content = report_data.get("data", {}).get("content", "")
+                        st.session_state["_mf_report"] = report_content
+                        st.session_state["_mf_report_id"] = report_id
+
+                st.success("Swarm simulation complete!")
+
+            except _requests.ConnectionError:
+                st.error(
+                    "Could not connect to MiroFish service. "
+                    f"Ensure it is running at **{_mf_url}**."
+                )
+            except _requests.HTTPError as e:
+                st.error(f"MiroFish API error: {e}")
+            except Exception as e:
+                st.error(f"Unexpected error: {e}")
+
+        # ── Display results if available ─────────────────────────────────────
+        if "_mf_report" in st.session_state and st.session_state["_mf_report"]:
+            st.divider()
+            st.markdown("### Simulation Results")
+
+            report_tab, agents_tab, raw_tab = st.tabs(
+                ["Prediction Report", "Agent Activity", "Seed Document"]
+            )
+
+            with report_tab:
+                st.markdown(st.session_state["_mf_report"])
+
+                # Download report
+                report_id = st.session_state.get("_mf_report_id", "")
+                if report_id:
+                    st.download_button(
+                        "Download Report (Markdown)",
+                        data=st.session_state["_mf_report"],
+                        file_name=f"mirofish_report_{report_id}.md",
+                        mime="text/markdown",
+                    )
+
+            with agents_tab:
+                sim_id = st.session_state.get("_mf_sim_id", "")
+                if sim_id:
+                    try:
+                        timeline_resp = _mf_get(f"/simulation/{sim_id}/timeline")
+                        timeline = timeline_resp.get("data", {}).get("rounds", [])
+                        if timeline:
+                            tl_data = []
+                            for rnd in timeline:
+                                tl_data.append({
+                                    "Round": rnd.get("round", ""),
+                                    "Actions": rnd.get("action_count", 0),
+                                    "Summary": rnd.get("summary", "")[:200],
+                                })
+                            tl_df = pd.DataFrame(tl_data)
+
+                            # Actions-per-round chart
+                            fig_actions = go.Figure(go.Bar(
+                                x=tl_df["Round"],
+                                y=tl_df["Actions"],
+                                marker_color="#f26822",
+                                hovertemplate="Round %{x}<br>%{y} actions<extra></extra>",
+                            ))
+                            fig_actions.update_layout(
+                                title=dict(
+                                    text="Agent Actions per Round",
+                                    font=dict(size=14),
+                                    x=0,
+                                    xanchor="left",
+                                ),
+                                height=300,
+                                margin=dict(t=40, b=40, l=60, r=20),
+                                plot_bgcolor="white",
+                                paper_bgcolor="white",
+                                font=dict(
+                                    family="Montserrat, Arial, sans-serif",
+                                    size=12,
+                                    color="#333333",
+                                ),
+                                xaxis=dict(title="Round"),
+                                yaxis=dict(title="Actions"),
+                            )
+                            st.plotly_chart(fig_actions, use_container_width=True)
+
+                            st.dataframe(tl_df, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No timeline data available.")
+                    except Exception as e:
+                        st.warning(f"Could not load agent activity: {e}")
+
+                    # Interactive agent interview
+                    st.markdown("#### Ask an Agent")
+                    st.caption(
+                        "Interview a simulated agent about their predictions for this program."
+                    )
+                    interview_q = st.text_input(
+                        "Question for agents",
+                        placeholder="What do you think will happen to enrollment in 3 years?",
+                        key="mf_interview_q",
+                    )
+                    if interview_q and st.button("Ask All Agents", key="mf_ask_all"):
+                        try:
+                            with st.spinner("Interviewing agents..."):
+                                interview_resp = _mf_post("/simulation/interview/all", {
+                                    "simulation_id": sim_id,
+                                    "prompt": interview_q,
+                                })
+                                responses = interview_resp.get("data", {}).get("responses", [])
+                                for r in responses:
+                                    agent_name = r.get("agent_name", "Agent")
+                                    answer = r.get("response", "")
+                                    with st.expander(f"**{agent_name}**"):
+                                        st.write(answer)
+                        except Exception as e:
+                            st.warning(f"Interview failed: {e}")
+
+            with raw_tab:
+                seed = st.session_state.get("_mf_seed", "")
+                if seed:
+                    st.code(seed, language="markdown")
+                else:
+                    st.info("No seed document available.")
 
 
 if __name__ == "__main__":
