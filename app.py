@@ -1640,9 +1640,9 @@ def run_google_trends_query(
 # ── MiroFish Swarm Intelligence helpers ───────────────────────────────────────
 
 def _mf_base_url() -> str:
-    """Return configured MiroFish API base URL."""
+    """Return configured MiroFish API base URL (includes /api prefix)."""
     try:
-        return st.secrets["mirofish"]["base_url"].rstrip("/")
+        return st.secrets["mirofish"]["base_url"].rstrip("/") + "/api"
     except (KeyError, FileNotFoundError):
         return ""
 
