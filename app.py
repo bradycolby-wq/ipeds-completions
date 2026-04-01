@@ -1817,6 +1817,17 @@ def main():
         st.markdown("## 🎓 IPEDS Explorer")
         st.caption("Completions 2014–15 → 2023–24")
 
+        # DB version diagnostic (small caption at top of sidebar)
+        try:
+            _diag_conn = get_conn()
+            _diag_vol = _diag_conn.execute(
+                "SELECT COUNT(*) FROM search_volume_calibration"
+            ).fetchone()[0]
+            _diag_conn.close()
+            st.caption(f"DB: v1.5 | Volume cal: {_diag_vol} keywords")
+        except Exception:
+            st.caption("DB: pre-v1.5 (no volume calibration)")
+
         # Quick-select presets
         preset_names = ["— Select a program —"] + list(PROGRAM_PRESETS.keys())
         chosen_preset = st.selectbox(
