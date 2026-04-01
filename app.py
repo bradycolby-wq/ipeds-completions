@@ -1637,6 +1637,8 @@ def run_google_trends_query(
     per_cip_volume = None
     geo_volume = None
     est_monthly_vol = None
+    state_volume_data = None
+    metro_volume_data = None
     try:
         cal_sql = f"""
             SELECT sv.cipcode, sv.est_monthly_vol, sv.anchor_ratio
@@ -2881,8 +2883,6 @@ def main():
                 "#8B5CF6", "#0f86c1", "#e87537", "#10B981", "#EF4444",
                 "#F59E0B", "#EC4899", "#14B8A6", "#6366F1", "#F97316",
             ]
-
-            from plotly.subplots import make_subplots
 
             if _show_volume:
                 # ── Dual-axis chart: volume (left) + interest index (right)
