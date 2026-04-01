@@ -1745,8 +1745,14 @@ def run_google_trends_query(
                         ]
                 except Exception:
                     pass
-    except Exception:
-        pass  # Table may not exist yet
+    except Exception as _vol_err:
+        import traceback as _tb
+        _vol_debug = _tb.format_exc()
+        # Store debug info so the UI can display it
+        has_volume = False
+        _vol_error_msg = f"{type(_vol_err).__name__}: {_vol_err}\n{_vol_debug}"
+    else:
+        _vol_error_msg = None
 
     conn.close()
 
@@ -1764,6 +1770,7 @@ def run_google_trends_query(
         "est_monthly_vol": est_monthly_vol,
         "state_volume_data": state_volume_data if has_volume else None,
         "metro_volume_data": metro_volume_data if has_volume else None,
+        "_vol_error_msg": _vol_error_msg,
     }
 
 
@@ -2761,6 +2768,12 @@ def main():
             _has_volume = trends_data.get("has_volume", False)
             _volume_series = trends_data.get("volume_series")
             _per_cip_volume = trends_data.get("per_cip_volume")
+
+            # Debug: show volume calibration errors if any
+            _vol_err_msg = trends_data.get("_vol_error_msg")
+            if _vol_err_msg:
+                with st.expander("Volume calibration error (debug)", expanded=False):
+                    st.code(_vol_err_msg)
             _geo_volume = trends_data.get("geo_volume")
             _est_monthly_vol = trends_data.get("est_monthly_vol")
 
