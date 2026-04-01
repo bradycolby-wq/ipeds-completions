@@ -2767,43 +2767,15 @@ def main():
             _has_volume = trends_data.get("has_volume", False)
             _volume_series = trends_data.get("volume_series")
             _per_cip_volume = trends_data.get("per_cip_volume")
-
-            # Debug: show volume calibration errors if any
-            _vol_err_msg = trends_data.get("_vol_error_msg")
-            if _vol_err_msg:
-                with st.expander("Volume calibration error (debug)", expanded=False):
-                    st.code(_vol_err_msg)
             _geo_volume = trends_data.get("geo_volume")
             _est_monthly_vol = trends_data.get("est_monthly_vol")
 
-            # Volume toggle
-            _show_volume = False
-            if _has_volume and _volume_series is not None:
-                _show_volume = st.toggle(
-                    "Show estimated search volume",
-                    value=False,
-                    help="Convert relative interest index to estimated "
-                         "monthly search volume, calibrated against known "
-                         "keyword volumes.",
-                )
-
-            # YoY change: compare latest 12 months to prior 12 months
-            _yoy_change = None
-            if _show_volume and _volume_series is not None and len(_volume_series) >= 24:
-                _recent = _volume_series.tail(12)["volume"].mean()
-                _prior = _volume_series.iloc[-24:-12]["volume"].mean()
-                if _prior > 0:
-                    _yoy_change = (_recent - _prior) / _prior
-            elif len(df_trend) >= 24:
-                _recent = df_trend.tail(12)["interest"].mean()
-                _prior = df_trend.iloc[-24:-12]["interest"].mean()
-                if _prior > 0:
-                    _yoy_change = (_recent - _prior) / _prior
-
-            # Peak interest
-            _peak_idx = df_trend["interest"].idxmax()
-            _peak_date = df_trend.loc[_peak_idx, "date"]
-            _peak_val = df_trend.loc[_peak_idx, "interest"]
+            # Volume is default when calibration data exists
+            _show_volume = (
+                _has_volume
+                and _volume_series is not None
+                and not _volume_series.empty
+            )
 
             # Helper to format volume numbers
             def _fmt_vol(v):
@@ -2812,43 +2784,93 @@ def main():
                 if v >= 1_000_000:
                     return f"{v / 1_000_000:.1f}M"
                 if v >= 1_000:
-                    return f"{v / 1_000:.0f}K"
+                    return f"{v / 1_000:.1f}K"
                 return f"{v:,.0f}"
 
-            # Metrics
-            t1, t2, t3 = st.columns(3)
-            if _show_volume and _geo_volume is not None:
-                t1.metric(
-                    f"Est. Monthly Searches ({geo_label})",
-                    _fmt_vol(_geo_volume),
-                    help="Estimated monthly search volume calibrated from "
-                         "Google Trends data and known keyword volumes.",
+            # ── Rolling comparison metrics (all based on volume) ─────────
+            _vol_src = _volume_series if _show_volume else None
+            _int_src = df_trend
+
+            # Monthly volume = rolling 12-month average
+            _avg_monthly_vol = None
+            if _vol_src is not None and len(_vol_src) >= 12:
+                _avg_monthly_vol = _vol_src.tail(12)["volume"].mean()
+
+            # MoM: most recent month vs previous month
+            _mom_change = None
+            if _vol_src is not None and len(_vol_src) >= 2:
+                _cur_m = _vol_src["volume"].iloc[-1]
+                _prev_m = _vol_src["volume"].iloc[-2]
+                if _prev_m > 0:
+                    _mom_change = (_cur_m - _prev_m) / _prev_m
+
+            # QoQ: most recent 3 months vs prior 3 months
+            _qoq_change = None
+            if _vol_src is not None and len(_vol_src) >= 6:
+                _cur_q = _vol_src.tail(3)["volume"].mean()
+                _prev_q = _vol_src.iloc[-6:-3]["volume"].mean()
+                if _prev_q > 0:
+                    _qoq_change = (_cur_q - _prev_q) / _prev_q
+
+            # YoY: most recent 12 months vs prior 12 months
+            _yoy_change = None
+            if _vol_src is not None and len(_vol_src) >= 24:
+                _cur_y = _vol_src.tail(12)["volume"].mean()
+                _prev_y = _vol_src.iloc[-24:-12]["volume"].mean()
+                if _prev_y > 0:
+                    _yoy_change = (_cur_y - _prev_y) / _prev_y
+            elif len(_int_src) >= 24:
+                _cur_y = _int_src.tail(12)["interest"].mean()
+                _prev_y = _int_src.iloc[-24:-12]["interest"].mean()
+                if _prev_y > 0:
+                    _yoy_change = (_cur_y - _prev_y) / _prev_y
+
+            # Metrics — 4 columns when volume is available
+            if _show_volume and _avg_monthly_vol is not None:
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric(
+                    "Monthly Search Volume",
+                    _fmt_vol(round(_avg_monthly_vol)),
+                    help="Average estimated monthly searches over the "
+                         "most recent 12 months.",
+                )
+                m2.metric(
+                    "MoM Change",
+                    f"{_mom_change:+.1%}" if _mom_change is not None else "N/A",
+                    help="Most recent month vs. previous month.",
+                )
+                m3.metric(
+                    "QoQ Change",
+                    f"{_qoq_change:+.1%}" if _qoq_change is not None else "N/A",
+                    help="Most recent 3 months vs. prior 3 months.",
+                )
+                m4.metric(
+                    "YoY Change",
+                    f"{_yoy_change:+.1%}" if _yoy_change is not None else "N/A",
+                    help="Most recent 12 months vs. prior 12 months.",
                 )
             else:
+                # Fallback: interest-only metrics
+                _peak_idx = df_trend["interest"].idxmax()
+                _peak_date = df_trend.loc[_peak_idx, "date"]
+                t1, t2, t3 = st.columns(3)
                 t1.metric(
                     f"Search Interest ({geo_label})",
-                    f"{_geo_interest:.0f}/100" if _geo_interest is not None else "N/A",
-                    help="Google Trends relative interest (0=none, 100=peak). "
-                         "Higher values indicate more search activity.",
+                    f"{_geo_interest:.0f}/100"
+                    if _geo_interest is not None else "N/A",
+                    help="Google Trends relative interest (0=none, 100=peak).",
                 )
-            t2.metric(
-                "YoY Change",
-                f"{_yoy_change:+.1%}" if _yoy_change is not None else "N/A",
-            )
-            if _show_volume and _est_monthly_vol is not None:
-                t3.metric(
-                    "Est. Monthly Volume",
-                    _fmt_vol(round(_est_monthly_vol)),
-                    help="Estimated average monthly search volume based on "
-                         "March 2025 calibration anchor.",
+                t2.metric(
+                    "YoY Change",
+                    f"{_yoy_change:+.1%}" if _yoy_change is not None else "N/A",
                 )
-            else:
                 t3.metric(
                     "Peak Interest",
-                    f"{_peak_date.strftime('%b %Y')}" if pd.notna(_peak_date) else "N/A",
+                    f"{_peak_date.strftime('%b %Y')}"
+                    if pd.notna(_peak_date) else "N/A",
                 )
 
-            # ── Chart 1: National Interest / Volume Over Time ────────────
+            # ── Chart: Dual-axis (volume left, index right) or index-only
             df_per_cip = trends_data["per_cip_time"]
             _multi_cip = (
                 not df_per_cip.empty
@@ -2860,97 +2882,148 @@ def main():
                 "#F59E0B", "#EC4899", "#14B8A6", "#6366F1", "#F97316",
             ]
 
-            # Choose data column and labels based on volume toggle
-            _y_col = "volume" if _show_volume else "interest"
-            _y_label = "Est. Monthly Searches" if _show_volume else "Interest (0-100)"
-            _hover_label = "Volume" if _show_volume else "Interest"
-            _hover_fmt = (
-                "{:,.0f}" if _show_volume else "{:.0f}"
-            )
+            from plotly.subplots import make_subplots
 
-            if _multi_cip:
-                # Per-CIP comparison chart
-                fig_trend = go.Figure()
-                _use_vol_per_cip = (
-                    _show_volume
-                    and _per_cip_volume is not None
-                    and "volume" in _per_cip_volume.columns
-                )
-                _chart_df = _per_cip_volume if _use_vol_per_cip else df_per_cip
-                _y = "volume" if _use_vol_per_cip else "interest"
-                for idx, (cip, grp) in enumerate(
-                    _chart_df.groupby("cipcode", sort=False)
-                ):
-                    _color = _trend_colors[idx % len(_trend_colors)]
-                    _label = grp["search_term"].iloc[0]
+            if _show_volume:
+                # ── Dual-axis chart: volume (left) + interest index (right)
+                fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
+
+                if _multi_cip:
+                    _use_vol = (
+                        _per_cip_volume is not None
+                        and "volume" in _per_cip_volume.columns
+                    )
+                    _vdf = _per_cip_volume if _use_vol else df_per_cip
+                    for idx, (cip, grp) in enumerate(
+                        _vdf.groupby("cipcode", sort=False)
+                    ):
+                        _color = _trend_colors[idx % len(_trend_colors)]
+                        _label = grp["search_term"].iloc[0]
+                        # Volume line (left axis)
+                        if _use_vol:
+                            fig_trend.add_trace(go.Scatter(
+                                x=grp["date"], y=grp["volume"],
+                                mode="lines", name=_label,
+                                line=dict(width=2, color=_color),
+                                hovertemplate=(
+                                    f"<b>{_label}</b><br>"
+                                    "%{x|%b %Y}<br>"
+                                    "Volume: %{y:,.0f}<extra></extra>"
+                                ),
+                            ), secondary_y=False)
+
+                    # Interest index as dashed line on right axis
                     fig_trend.add_trace(go.Scatter(
-                        x=grp["date"],
-                        y=grp[_y],
-                        mode="lines",
-                        name=_label,
-                        line=dict(width=2, color=_color),
+                        x=df_trend["date"], y=df_trend["interest"],
+                        mode="lines", name="Interest Index",
+                        line=dict(width=1.5, color="#9CA3AF", dash="dot"),
                         hovertemplate=(
-                            f"<b>{_label}</b><br>"
+                            "<b>Interest Index</b><br>"
                             "%{x|%b %Y}<br>"
-                            + _hover_label
-                            + ": %{y:,.0f}<extra></extra>"
+                            "Index: %{y:.0f}/100<extra></extra>"
+                        ),
+                    ), secondary_y=True)
+
+                    _show_legend = True
+                    _chart_title = (
+                        "<b>Estimated Monthly Search Volume by Program</b>"
+                    )
+                else:
+                    # Single CIP: volume area + interest dashed line
+                    fig_trend.add_trace(go.Scatter(
+                        x=_volume_series["date"],
+                        y=_volume_series["volume"],
+                        mode="lines", name="Est. Volume",
+                        line=dict(width=2, color="#8B5CF6"),
+                        fill="tozeroy",
+                        fillcolor="rgba(139, 92, 246, 0.1)",
+                        hovertemplate=(
+                            "<b>%{x|%b %Y}</b><br>"
+                            "Volume: %{y:,.0f}<extra></extra>"
+                        ),
+                    ), secondary_y=False)
+
+                    fig_trend.add_trace(go.Scatter(
+                        x=df_trend["date"], y=df_trend["interest"],
+                        mode="lines", name="Interest Index",
+                        line=dict(width=1.5, color="#9CA3AF", dash="dot"),
+                        hovertemplate=(
+                            "<b>%{x|%b %Y}</b><br>"
+                            "Index: %{y:.0f}/100<extra></extra>"
+                        ),
+                    ), secondary_y=True)
+
+                    _show_legend = True
+                    _chart_title = (
+                        "<b>Estimated Monthly Search Volume Over Time</b>"
+                    )
+
+                fig_trend.update_yaxes(
+                    title_text="Est. Monthly Searches",
+                    showgrid=True, gridcolor="#F3F4F6", gridwidth=1,
+                    rangemode="tozero",
+                    secondary_y=False,
+                )
+                fig_trend.update_yaxes(
+                    title_text="Interest Index (0-100)",
+                    showgrid=False,
+                    rangemode="tozero", range=[0, 105],
+                    secondary_y=True,
+                )
+
+            else:
+                # ── Interest-only chart (no volume calibration) ──────────
+                fig_trend = go.Figure()
+
+                if _multi_cip:
+                    for idx, (cip, grp) in enumerate(
+                        df_per_cip.groupby("cipcode", sort=False)
+                    ):
+                        _color = _trend_colors[idx % len(_trend_colors)]
+                        _label = grp["search_term"].iloc[0]
+                        fig_trend.add_trace(go.Scatter(
+                            x=grp["date"], y=grp["interest"],
+                            mode="lines", name=_label,
+                            line=dict(width=2, color=_color),
+                            hovertemplate=(
+                                f"<b>{_label}</b><br>"
+                                "%{x|%b %Y}<br>"
+                                "Interest: %{y:.0f}<extra></extra>"
+                            ),
+                        ))
+                    fig_trend.add_trace(go.Scatter(
+                        x=df_trend["date"], y=df_trend["interest"],
+                        mode="lines", name="Average (all selected)",
+                        line=dict(width=2.5, color="#333333", dash="dash"),
+                        hovertemplate=(
+                            "<b>Average</b><br>"
+                            "%{x|%b %Y}<br>"
+                            "Interest: %{y:.0f}<extra></extra>"
                         ),
                     ))
-                # Aggregate dashed line
-                _agg_y = (
-                    _volume_series["volume"]
-                    if _show_volume and _volume_series is not None
-                    else df_trend["interest"]
-                )
-                fig_trend.add_trace(go.Scatter(
-                    x=df_trend["date"],
-                    y=_agg_y,
-                    mode="lines",
-                    name="Average (all selected)",
-                    line=dict(width=2.5, color="#333333", dash="dash"),
-                    hovertemplate=(
-                        "<b>Average</b><br>"
-                        "%{x|%b %Y}<br>"
-                        + _hover_label
-                        + ": %{y:,.0f}<extra></extra>"
-                    ),
-                ))
-                _show_legend = True
-                _chart_title = (
-                    "<b>Estimated Monthly Search Volume by Program</b>"
-                    if _show_volume
-                    else "<b>National Search Interest by Program</b>"
-                )
-            else:
-                # Single CIP area chart
-                fig_trend = go.Figure()
-                _chart_y = (
-                    _volume_series["volume"]
-                    if _show_volume and _volume_series is not None
-                    else df_trend["interest"]
-                )
-                fig_trend.add_trace(go.Scatter(
-                    x=df_trend["date"],
-                    y=_chart_y,
-                    mode="lines",
-                    name=_hover_label,
-                    line=dict(width=2, color="#8B5CF6"),
-                    fill="tozeroy",
-                    fillcolor="rgba(139, 92, 246, 0.1)",
-                    hovertemplate=(
-                        "<b>%{x|%b %Y}</b><br>"
-                        + _hover_label
-                        + ": %{y:,.0f}<extra></extra>"
-                    ),
-                ))
-                _show_legend = False
-                _chart_title = (
-                    "<b>Estimated Monthly Search Volume Over Time</b>"
-                    if _show_volume
-                    else "<b>National Search Interest Over Time</b>"
+                    _show_legend = True
+                    _chart_title = "<b>National Search Interest by Program</b>"
+                else:
+                    fig_trend.add_trace(go.Scatter(
+                        x=df_trend["date"], y=df_trend["interest"],
+                        mode="lines", name="Search Interest",
+                        line=dict(width=2, color="#8B5CF6"),
+                        fill="tozeroy",
+                        fillcolor="rgba(139, 92, 246, 0.1)",
+                        hovertemplate=(
+                            "<b>%{x|%b %Y}</b><br>"
+                            "Interest: %{y:.0f}<extra></extra>"
+                        ),
+                    ))
+                    _show_legend = False
+                    _chart_title = "<b>National Search Interest Over Time</b>"
+
+                fig_trend.update_yaxes(
+                    title="Interest (0-100)",
+                    showgrid=True, gridcolor="#F3F4F6", gridwidth=1,
+                    rangemode="tozero", range=[0, 105],
                 )
 
-            _y_range = None if _show_volume else [0, 105]
             fig_trend.update_layout(
                 title=dict(
                     text=_chart_title,
@@ -2960,13 +3033,8 @@ def main():
                     title="", showgrid=True,
                     gridcolor="#F3F4F6", gridwidth=1,
                 ),
-                yaxis=dict(
-                    title=_y_label,
-                    showgrid=True, gridcolor="#F3F4F6", gridwidth=1,
-                    rangemode="tozero", range=_y_range,
-                ),
                 height=400,
-                margin=dict(t=60, b=40, l=60, r=20),
+                margin=dict(t=60, b=40, l=60, r=60),
                 plot_bgcolor="white",
                 paper_bgcolor="white",
                 font=dict(
