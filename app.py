@@ -2793,10 +2793,32 @@ def main():
             _vol_src = _volume_series if _show_volume else None
             _int_src = df_trend
 
-            # Monthly volume = rolling 12-month average
+            # Geographic volume scaling factor:
+            # For sub-national geos, scale national volume by the geo's
+            # share from state/metro volume data.
+            _geo_scale = 1.0
+            _state_vol = trends_data.get("state_volume_data")
+            _metro_vol_data = trends_data.get("metro_volume_data")
+            if _show_volume and _est_monthly_vol and _est_monthly_vol > 0:
+                if geo_key == "state" and geo_values and _state_vol is not None:
+                    _sel = _state_vol[
+                        _state_vol["state_abbr"].isin(geo_values)
+                    ]
+                    if not _sel.empty:
+                        _geo_scale = _sel["volume"].sum() / _est_monthly_vol
+                elif geo_key == "metro" and geo_values and _metro_vol_data is not None:
+                    _sel = _metro_vol_data[
+                        _metro_vol_data["cbsa_code"].isin(geo_values)
+                    ]
+                    if not _sel.empty:
+                        _geo_scale = _sel["volume"].sum() / _est_monthly_vol
+
+            # Monthly volume = rolling 12-month average, scaled to geo
             _avg_monthly_vol = None
             if _vol_src is not None and len(_vol_src) >= 12:
-                _avg_monthly_vol = _vol_src.tail(12)["volume"].mean()
+                _avg_monthly_vol = (
+                    _vol_src.tail(12)["volume"].mean() * _geo_scale
+                )
 
             # MoM: most recent month vs previous month
             _mom_change = None
@@ -2827,14 +2849,19 @@ def main():
                 if _prev_y > 0:
                     _yoy_change = (_cur_y - _prev_y) / _prev_y
 
+            # Geo label for volume metric
+            _vol_geo_label = (
+                geo_label if geo_key != "national" else "National"
+            )
+
             # Metrics — 4 columns when volume is available
             if _show_volume and _avg_monthly_vol is not None:
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric(
-                    "Monthly Search Volume",
+                    f"Monthly Search Volume ({_vol_geo_label})",
                     _fmt_vol(round(_avg_monthly_vol)),
                     help="Average estimated monthly searches over the "
-                         "most recent 12 months.",
+                         "most recent 12 months, scaled to selected geography.",
                 )
                 m2.metric(
                     "MoM Change",
