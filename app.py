@@ -1722,30 +1722,43 @@ def run_google_trends_query(
                 except Exception:
                     pass
 
-            # Metro-level volume: weight interest by CBSA population
+            # Metro-level volume: compute for ALL metros (not just top 15)
+            # so volume shares are accurate, then take top 15 by volume
             metro_volume_data = None
-            if not df_metros.empty:
-                try:
-                    cbsa_codes = df_metros["cbsa_code"].tolist()
-                    ph = ",".join("?" * len(cbsa_codes))
+            try:
+                all_metro_sql = f"""
+                    SELECT w.cbsa_code, w.cbsa_name,
+                           SUM(gt.interest * w.weight) / SUM(w.weight) AS interest
+                    FROM google_trends_dma gt
+                    JOIN dma_cbsa_weights w ON gt.dma_code = w.dma_code
+                    WHERE ({cip_where}) AND gt.interest > 0
+                    GROUP BY w.cbsa_code
+                """
+                df_all_metros = pd.read_sql_query(
+                    all_metro_sql, conn, params=cip_params,
+                )
+                if not df_all_metros.empty:
                     df_cbsa_pop = pd.read_sql_query(
-                        f"SELECT cbsa_code, population FROM cbsa_populations "
-                        f"WHERE cbsa_code IN ({ph})",
+                        "SELECT cbsa_code, population FROM cbsa_populations",
                         conn,
-                        params=cbsa_codes,
                     )
-                    mv = df_metros.merge(df_cbsa_pop, on="cbsa_code", how="inner")
+                    mv = df_all_metros.merge(
+                        df_cbsa_pop, on="cbsa_code", how="inner",
+                    )
                     mv["weighted"] = mv["interest"] * mv["population"]
                     total_weighted = mv["weighted"].sum()
                     if total_weighted > 0:
                         mv["volume"] = (
                             mv["weighted"] / total_weighted * est_monthly_vol
                         ).round(0).astype(int)
-                        metro_volume_data = mv[
-                            ["cbsa_code", "cbsa_name", "interest", "volume"]
-                        ]
-                except Exception:
-                    pass
+                        # Top 15 by volume for display
+                        metro_volume_data = (
+                            mv[["cbsa_code", "cbsa_name", "interest", "volume"]]
+                            .sort_values("volume", ascending=False)
+                            .head(15)
+                        )
+            except Exception:
+                pass
     except Exception as _vol_err:
         import traceback as _tb
         _vol_debug = _tb.format_exc()
