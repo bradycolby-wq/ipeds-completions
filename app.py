@@ -1626,9 +1626,8 @@ def run_google_trends_query(
         df_per_cip["date"] = pd.to_datetime(df_per_cip["month"] + "-01")
         df_per_cip = df_per_cip[["date", "cipcode", "search_term", "interest"]]
 
-    conn.close()
-
     if df_time.empty:
+        conn.close()
         return None
 
     # ── Volume calibration ────────────────────────────────────────────────
