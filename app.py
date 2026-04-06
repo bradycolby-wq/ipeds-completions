@@ -835,6 +835,101 @@ def run_distance_ed_query(
     }
 
 
+@st.cache_data(show_spinner=False, ttl=600)
+def run_dep_query(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    geo_key: str,
+    geo_values: tuple,
+):
+    """Distance education program counts from completions_dep table.
+
+    Returns DataFrame with columns:
+      year, programs, programs_de, programs_de_some, programs_de_any
+    aggregated across matching CIPs, award levels, and geography.
+    Or None if completions_dep table doesn't exist / no data.
+
+    Uses 6-digit CIP codes from completions_dep (filters out 2-digit
+    summary rows to avoid double-counting). Joins institutions table
+    for geographic filtering.
+    """
+    cip_patterns = expand_cip_patterns(cip_patterns)
+
+    conn = get_conn()
+    try:
+        conn.execute("SELECT 1 FROM completions_dep LIMIT 1")
+    except Exception:
+        conn.close()
+        return None
+
+    params = []
+    where = [
+        "d.programs > 0",
+        "LENGTH(d.cipcode) >= 5",  # exclude 2-digit summary rows
+    ]
+
+    if cip_patterns:
+        cip_clauses = []
+        for p in cip_patterns:
+            cip_clauses.append(
+                "d.cipcode LIKE ?" if "%" in p else "d.cipcode = ?"
+            )
+            params.append(p)
+        where.append(f"({' OR '.join(cip_clauses)})")
+
+    if awlevels:
+        placeholders = ",".join("?" * len(awlevels))
+        where.append(f"d.awlevel IN ({placeholders})")
+        params.extend(awlevels)
+
+    geo_join = ""
+    if geo_key == "state" and geo_values:
+        geo_join = (
+            "INNER JOIN institutions i "
+            "ON d.unitid = i.unitid AND d.year = i.year"
+        )
+        placeholders = ",".join("?" * len(geo_values))
+        where.append(f"i.stabbr IN ({placeholders})")
+        params.extend(geo_values)
+    elif geo_key == "metro" and geo_values:
+        geo_join = (
+            "INNER JOIN institutions i "
+            "ON d.unitid = i.unitid AND d.year = i.year"
+        )
+        placeholders = ",".join("?" * len(geo_values))
+        where.append(f"i.cbsa IN ({placeholders})")
+        params.extend(geo_values)
+
+    where_sql = "WHERE " + " AND ".join(where)
+
+    sql = f"""
+        SELECT
+            d.year,
+            SUM(d.programs)         AS programs,
+            SUM(d.programs_de)      AS programs_de,
+            SUM(d.programs_de_some) AS programs_de_some,
+            SUM(d.programs_de_any)  AS programs_de_any
+        FROM completions_dep d
+        {geo_join}
+        {where_sql}
+        GROUP BY d.year
+        ORDER BY d.year
+    """
+
+    df = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+
+    if df.empty:
+        return None
+
+    # Compute percentage columns
+    df["pct_de_any"] = (
+        100.0 * df["programs_de_any"] / df["programs"]
+    ).round(1).where(df["programs"] > 0)
+
+    return df
+
+
 _CORESIGNAL_BASE = "https://api.coresignal.com/cdapi/v2/job_base"
 
 # Generic SOC titles to exclude from Coresignal searches (too broad / noisy)
@@ -2039,12 +2134,6 @@ def main():
             geo_key=geo_key,
             geo_values=tuple(geo_values),
         )
-        # de_data = run_distance_ed_query(
-        #     cip_patterns=cip_patterns,
-        #     awlevels=selected_awlevels,
-        #     geo_key=geo_key,
-        #     geo_values=tuple(geo_values),
-        # )
 
     if df.empty:
         st.warning(
@@ -2608,7 +2697,145 @@ def main():
             key="dl_inst",
         )
 
-    # ── Distance Education (hidden until data approach is resolved) ─────────
+    # ── Distance Education Programs ──────────────────────────────────────────
+    st.divider()
+    st.subheader("Distance Education Programs")
+    st.caption(
+        "Number of programs offered and share available via distance education "
+        "| Source: IPEDS Completions DEP Survey"
+    )
+
+    _dep_ok = False
+    try:
+        _dep_conn = get_conn()
+        _dep_conn.execute("SELECT 1 FROM completions_dep LIMIT 1")
+        _dep_conn.close()
+        _dep_ok = True
+    except Exception:
+        pass
+
+    if not _dep_ok:
+        st.info("Distance education program data not loaded.")
+    elif all_cips:
+        st.info(
+            "Distance education data is shown when specific CIP code(s) are "
+            "selected. Deselect **All CIP codes** and choose program(s)."
+        )
+    else:
+        with st.spinner("Querying distance education data..."):
+            df_dep = run_dep_query(
+                cip_patterns=cip_patterns,
+                awlevels=selected_awlevels,
+                geo_key=geo_key,
+                geo_values=tuple(geo_values),
+            )
+
+        if df_dep is None or df_dep.empty:
+            st.info("No distance education program data for these filters.")
+        else:
+            # ── Metrics ──────────────────────────────────────────────
+            _dep_latest = df_dep.iloc[-1]
+            _dep_earliest = df_dep.iloc[0]
+            _latest_yr = int(_dep_latest["year"])
+            _earliest_yr = int(_dep_earliest["year"])
+
+            _total_progs = int(_dep_latest["programs"])
+            _de_any = int(_dep_latest["programs_de_any"])
+            _pct_de = _dep_latest["pct_de_any"]
+
+            # Change in DE % over full period
+            _pct_de_first = _dep_earliest["pct_de_any"]
+            _pct_change = (
+                _pct_de - _pct_de_first
+                if pd.notna(_pct_de) and pd.notna(_pct_de_first) else None
+            )
+
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric(
+                f"Programs Offered ({yr_label(_latest_yr)})",
+                f"{_total_progs:,}",
+            )
+            d2.metric(
+                "DE Programs (Any)",
+                f"{_de_any:,}",
+                help="Programs completable entirely or partially "
+                     "via distance education.",
+            )
+            d3.metric(
+                "DE Share",
+                f"{_pct_de:.1f}%",
+            )
+            d4.metric(
+                f"DE Share Change ({yr_label(_earliest_yr)}-{yr_label(_latest_yr)})",
+                f"{_pct_change:+.1f} pp" if _pct_change is not None else "N/A",
+                help="Percentage point change in DE share over the period.",
+            )
+
+            # ── Dual-axis chart: programs (bars) + DE % (line) ───────
+            fig_dep = make_subplots(specs=[[{"secondary_y": True}]])
+
+            fig_dep.add_trace(go.Bar(
+                x=df_dep["year"].apply(yr_label),
+                y=df_dep["programs"],
+                name="Total Programs",
+                marker=dict(color="rgba(15, 134, 193, 0.25)"),
+                hovertemplate="%{y:,} programs<extra></extra>",
+            ), secondary_y=False)
+
+            fig_dep.add_trace(go.Bar(
+                x=df_dep["year"].apply(yr_label),
+                y=df_dep["programs_de_any"],
+                name="DE Programs (Any)",
+                marker=dict(color="rgba(139, 92, 246, 0.6)"),
+                hovertemplate="%{y:,} DE programs<extra></extra>",
+            ), secondary_y=False)
+
+            fig_dep.add_trace(go.Scatter(
+                x=df_dep["year"].apply(yr_label),
+                y=df_dep["pct_de_any"],
+                name="DE Share %",
+                mode="lines+markers",
+                line=dict(width=2.5, color="#f26822"),
+                marker=dict(size=6, color="#f26822"),
+                hovertemplate="%{y:.1f}%<extra></extra>",
+            ), secondary_y=True)
+
+            fig_dep.update_yaxes(
+                title_text="Programs Offered",
+                showgrid=True, gridcolor="#F3F4F6", gridwidth=1,
+                rangemode="tozero",
+                secondary_y=False,
+            )
+            fig_dep.update_yaxes(
+                title_text="DE Share (%)",
+                showgrid=False,
+                rangemode="tozero",
+                ticksuffix="%",
+                secondary_y=True,
+            )
+            fig_dep.update_layout(
+                title=dict(
+                    text="<b>Distance Education Programs Over Time</b>",
+                    font=dict(size=15), x=0, xanchor="left",
+                ),
+                xaxis=dict(title="", showgrid=False),
+                height=400,
+                margin=dict(t=60, b=40, l=60, r=60),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font=dict(
+                    family="Montserrat, Arial, sans-serif",
+                    size=12, color="#333333",
+                ),
+                barmode="overlay",
+                showlegend=True,
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="left", x=0, font=dict(size=11),
+                ),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_dep, use_container_width=True)
 
     # ── Graduate Outcomes (College Scorecard) ────────────────────────────────
     st.divider()
