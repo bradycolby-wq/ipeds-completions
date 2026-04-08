@@ -5,6 +5,7 @@ Streamlit app — academic years 2014-15 through 2023-24
 
 import sqlite3
 import urllib.request
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import requests as _requests
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from plotly.subplots import make_subplots
 import streamlit as st
 
@@ -1884,6 +1887,110 @@ def run_google_trends_query(
 
 
 
+# ── Excel export helper ──────────────────────────────────────────────────────
+
+_VI_ORANGE = "F26822"
+_VI_DARK = "333333"
+_HEADER_FILL = PatternFill(start_color=_VI_ORANGE, end_color=_VI_ORANGE, fill_type="solid")
+_HEADER_FONT = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
+_BODY_FONT = Font(name="Calibri", size=10, color=_VI_DARK)
+_THIN_BORDER = Border(
+    bottom=Side(style="thin", color="DDDDDD"),
+)
+_PCT_FMT = '0.0%'
+_MONEY_FMT = '$#,##0'
+_NUM_FMT = '#,##0'
+
+
+def _style_sheet(ws, df, pct_cols=None, money_cols=None, num_cols=None):
+    """Apply VI-branded formatting to a worksheet built from a DataFrame."""
+    pct_cols = set(pct_cols or [])
+    money_cols = set(money_cols or [])
+    num_cols = set(num_cols or [])
+
+    # Header row
+    for col_idx, col_name in enumerate(df.columns, 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # Body rows
+    for row_idx in range(2, ws.max_row + 1):
+        for col_idx in range(1, ws.max_column + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.font = _BODY_FONT
+            cell.border = _THIN_BORDER
+            col_name = df.columns[col_idx - 1]
+            if col_name in pct_cols:
+                cell.number_format = _PCT_FMT
+            elif col_name in money_cols:
+                cell.number_format = _MONEY_FMT
+            elif col_name in num_cols:
+                cell.number_format = _NUM_FMT
+
+    # Auto-width columns (capped at 40)
+    for col_idx, col_name in enumerate(df.columns, 1):
+        max_len = len(str(col_name))
+        for row_idx in range(2, min(ws.max_row + 1, 102)):
+            val = ws.cell(row=row_idx, column=col_idx).value
+            if val is not None:
+                max_len = max(max_len, len(str(val)))
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 3, 40)
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+
+def build_export_workbook(sheets_data):
+    """Build an openpyxl Workbook from a list of (sheet_name, df, fmt_opts) tuples.
+
+    fmt_opts is a dict with optional keys: pct_cols, money_cols, num_cols.
+    Returns bytes of the .xlsx file.
+    """
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    # Remove the default sheet
+    wb.remove(wb.active)
+
+    for sheet_name, df, fmt_opts in sheets_data:
+        if df is None or df.empty:
+            continue
+        # Truncate sheet name to 31 chars (Excel limit)
+        safe_name = sheet_name[:31]
+        ws = wb.create_sheet(title=safe_name)
+
+        # Write header
+        for col_idx, col_name in enumerate(df.columns, 1):
+            ws.cell(row=1, column=col_idx, value=col_name)
+
+        # Write data
+        for row_idx, row in enumerate(df.itertuples(index=False), 2):
+            for col_idx, value in enumerate(row, 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                # Convert numpy types to native Python
+                if isinstance(value, (np.integer,)):
+                    value = int(value)
+                elif isinstance(value, (np.floating,)):
+                    value = float(value) if pd.notna(value) else None
+                elif pd.isna(value) if isinstance(value, float) else False:
+                    value = None
+                cell.value = value
+
+        _style_sheet(
+            ws, df,
+            pct_cols=fmt_opts.get("pct_cols"),
+            money_cols=fmt_opts.get("money_cols"),
+            num_cols=fmt_opts.get("num_cols"),
+        )
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 def main():
     # One-time DB prep
@@ -2202,6 +2309,216 @@ def main():
 
     # Extract capacity CAGR for the projected program count bars
     capacity_cagr = proj_components.get("capacity")
+
+    # ── Export All to Excel button ────────────────────────────────────────────
+    def _build_excel_export():
+        """Collect data from all sections and build a multi-tab Excel file."""
+        sheets = []
+
+        # 1. Completions Trend
+        if "award_level_name" in df.columns:
+            trend_df = df[["year", "award_level_name", "completions"]].copy()
+            trend_df["year"] = trend_df["year"].apply(yr_label)
+            trend_df.columns = ["Year", "Award Level", "Completions"]
+        else:
+            trend_df = df.groupby("year")["completions"].sum().reset_index()
+            trend_df["year"] = trend_df["year"].apply(yr_label)
+            trend_df.columns = ["Year", "Completions"]
+
+        # Add YoY %
+        _totals = df.groupby("year")["completions"].sum().reset_index()
+        _totals = _totals.sort_values("year")
+        _totals["YoY % Change"] = _totals["completions"].pct_change()
+        _totals["year"] = _totals["year"].apply(yr_label)
+        _yoy_map = dict(zip(_totals["year"], _totals["YoY % Change"]))
+        trend_df["YoY % Change"] = trend_df["Year"].map(_yoy_map)
+
+        sheets.append(("Completions Trend", trend_df, {
+            "num_cols": ["Completions"],
+            "pct_cols": ["YoY % Change"],
+        }))
+
+        # 2. By Institution
+        if not df_inst.empty:
+            meta = (
+                df_inst.sort_values("year")
+                .groupby("unitid")[["instnm", "city", "stabbr", "control_name"]]
+                .last()
+                .reset_index()
+            )
+            pivot = df_inst.pivot_table(
+                index="unitid", columns="year", values="completions",
+                aggfunc="sum", fill_value=0,
+            ).reset_index()
+            pivot = pivot.merge(meta, on="unitid", how="left")
+            pivot.columns.name = None
+            yr_cols = sorted([c for c in pivot.columns if isinstance(c, int)])
+            first_col, last_col = yr_cols[0], yr_cols[-1]
+            n_years = last_col - first_col
+            col_3ago = last_col - 3
+
+            def _inst_cagr(row, start_col, n):
+                fv, lv = row[start_col], row[last_col]
+                if fv > 0 and lv > 0 and n > 0:
+                    return ((lv / fv) ** (1 / n) - 1)
+                return None
+
+            if col_3ago in yr_cols:
+                pivot["3-yr CAGR"] = pivot.apply(lambda r: _inst_cagr(r, col_3ago, 3), axis=1)
+            pivot["10-yr CAGR"] = pivot.apply(lambda r: _inst_cagr(r, first_col, n_years), axis=1)
+            pivot = pivot.rename(columns={y: yr_label(y) for y in yr_cols})
+            control_map = {"Public": "Public", "Private nonprofit": "Private", "Private for-profit": "For-Profit"}
+            pivot["control_name"] = pivot["control_name"].map(control_map).fillna(pivot["control_name"])
+            pivot["city"] = pivot["city"] + ", " + pivot["stabbr"]
+            pivot = pivot.drop(columns=["unitid", "stabbr"])
+            pivot = pivot.rename(columns={"instnm": "Institution", "city": "City", "control_name": "Control"})
+            yr_labels = [yr_label(y) for y in yr_cols]
+            cagr_cols = [c for c in ["3-yr CAGR", "10-yr CAGR"] if c in pivot.columns]
+            pivot = pivot[["Institution", "City", "Control"] + yr_labels + cagr_cols]
+            last_yr_lbl = yr_label(last_col)
+            pivot = pivot.sort_values(last_yr_lbl, ascending=False, na_position="last").reset_index(drop=True)
+
+            sheets.append(("By Institution", pivot, {
+                "num_cols": yr_labels,
+                "pct_cols": cagr_cols,
+            }))
+
+        # 3. Distance Education Programs
+        if not all_cips:
+            try:
+                _dep_conn = get_conn()
+                _dep_conn.execute("SELECT 1 FROM completions_dep LIMIT 1")
+                _dep_conn.close()
+                _dep_df = run_dep_query(
+                    cip_patterns=cip_patterns,
+                    awlevels=selected_awlevels,
+                    geo_key=geo_key,
+                    geo_values=tuple(geo_values),
+                )
+                if _dep_df is not None and not _dep_df.empty:
+                    dep_export = _dep_df.copy()
+                    dep_export["year"] = dep_export["year"].apply(yr_label)
+                    dep_export = dep_export.rename(columns={
+                        "year": "Year",
+                        "programs": "Total Programs",
+                        "programs_de_any": "DE Programs (Any)",
+                        "pct_de_any": "DE Share %",
+                    })
+                    cols_to_keep = [c for c in ["Year", "Total Programs", "DE Programs (Any)", "DE Share %"] if c in dep_export.columns]
+                    dep_export = dep_export[cols_to_keep]
+                    sheets.append(("Distance Education", dep_export, {
+                        "num_cols": ["Total Programs", "DE Programs (Any)"],
+                    }))
+            except Exception:
+                pass
+
+        # 4. Graduate Outcomes (Scorecard)
+        if not all_cips:
+            try:
+                _sc_conn = get_conn()
+                _sc_conn.execute("SELECT 1 FROM college_scorecard LIMIT 1")
+                _sc_conn.close()
+                _sc_df = run_scorecard_query(
+                    cip_patterns=cip_patterns,
+                    awlevels=selected_awlevels,
+                    geo_key=geo_key,
+                    geo_values=tuple(geo_values),
+                )
+                if not _sc_df.empty:
+                    _sc_df = (
+                        _sc_df.sort_values("earn_mdn_4yr", ascending=False)
+                        .drop_duplicates(subset=["unitid"], keep="first")
+                    )
+                    sc_export = _sc_df.rename(columns={
+                        "instnm": "Institution",
+                        "city": "City",
+                        "control_name": "Control",
+                        "earn_mdn_4yr": "Median Earnings (4yr)",
+                        "debt_all_stgp_eval_mdn": "Median Debt",
+                        "debt_to_earnings": "Debt/Earnings",
+                    })
+                    sc_export = sc_export.sort_values(
+                        "Debt/Earnings", ascending=True, na_position="last"
+                    )
+                    sc_export = sc_export[
+                        ["Institution", "City", "Control",
+                         "Median Earnings (4yr)", "Median Debt", "Debt/Earnings"]
+                    ].reset_index(drop=True)
+                    sheets.append(("Graduate Outcomes", sc_export, {
+                        "money_cols": ["Median Earnings (4yr)", "Median Debt"],
+                    }))
+            except Exception:
+                pass
+
+        # 5. Employment by Occupation
+        if not all_cips:
+            try:
+                _conn = get_conn()
+                _conn.execute("SELECT 1 FROM oes_employment LIMIT 1")
+                _conn.execute("SELECT 1 FROM cip_soc_crosswalk LIMIT 1")
+                _conn.close()
+                _emp_df = run_employment_query(
+                    cip_patterns=cip_patterns,
+                    awlevels=selected_awlevels,
+                    geo_key=geo_key,
+                    geo_values=tuple(geo_values),
+                )
+                if not _emp_df.empty:
+                    _latest_yr = _emp_df["year"].max()
+                    _emp_latest = _emp_df[_emp_df["year"] == _latest_yr].copy()
+                    emp_export = _emp_latest.rename(columns={
+                        "occ_code": "SOC Code",
+                        "occ_title": "Occupation",
+                        "tot_emp": "Total Employment",
+                        "a_median": "Median Annual Wage",
+                    })
+                    cols = [c for c in ["SOC Code", "Occupation", "Total Employment", "Median Annual Wage"] if c in emp_export.columns]
+                    emp_export = emp_export[cols].sort_values("Total Employment", ascending=False).reset_index(drop=True)
+                    sheets.append(("Employment", emp_export, {
+                        "num_cols": ["Total Employment"],
+                        "money_cols": ["Median Annual Wage"],
+                    }))
+            except Exception:
+                pass
+
+        # 6. Summary / metadata tab
+        summary_rows = [
+            {"Field": "Report Generated", "Value": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")},
+            {"Field": "Geography", "Value": geo_label},
+            {"Field": "CIP Code(s)", "Value": "All Programs" if all_cips else "; ".join(selected_cip_labels)},
+            {"Field": "Award Level(s)", "Value": "All Award Levels" if all_levels else "; ".join(selected_level_labels)},
+        ]
+        summary_df = pd.DataFrame(summary_rows)
+        sheets.insert(0, ("Summary", summary_df, {}))
+
+        return build_export_workbook(sheets)
+
+    cip_slug = "all_programs" if all_cips else (
+        "_".join(cip_label_to_code[l] for l in selected_cip_labels) or "completions"
+    )
+    excel_fname = (
+        f"ipeds_{cip_slug}"
+        f"_{geo_label.replace(', ', '_').replace(' ', '_')}.xlsx"
+    )
+
+    # Place the button in the top-right area
+    _btn_col1, _btn_col2 = st.columns([5, 1])
+    with _btn_col2:
+        if st.button("📊 Export All to Excel", type="primary", use_container_width=True):
+            with st.spinner("Building Excel export…"):
+                excel_bytes = _build_excel_export()
+            st.session_state["_excel_export"] = excel_bytes
+            st.session_state["_excel_fname"] = excel_fname
+
+    if "_excel_export" in st.session_state:
+        with _btn_col2:
+            st.download_button(
+                "⬇️ Download Excel",
+                data=st.session_state["_excel_export"],
+                file_name=st.session_state["_excel_fname"],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_excel_all",
+            )
 
     # ── Summary metrics ───────────────────────────────────────────────────────
     agg = df_totals
