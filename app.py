@@ -2535,8 +2535,13 @@ def main():
     val_3ago = int(agg[yr_3ago]) if yr_3ago in agg.index else None
     cagr_3 = (last_val / val_3ago) ** (1 / 3) - 1 if val_3ago else None
 
-    # Projected CAGR
-    if projection and last_val > 0:
+    # Projected CAGR – use blended rate directly when available so the
+    # header metric matches the footnote (avoids rounding drift from
+    # back-computing CAGR out of integer-rounded projection values).
+    if proj_components and "blended_rate" in proj_components:
+        cagr_proj = proj_components["blended_rate"]
+        proj_last_yr = last_yr + (len(projection) if projection else 5)
+    elif projection and last_val > 0:
         proj_last_yr, proj_last_val = projection[-1]
         n_proj = proj_last_yr - last_yr
         cagr_proj = (proj_last_val / last_val) ** (1 / n_proj) - 1 if n_proj > 0 else None
@@ -2739,7 +2744,9 @@ def main():
         _parts = []
         _w = proj_components.get("weights", {})
         if "trend" in _w:
-            _parts.append(f"completions trend ({_w['trend']:.0%})")
+            _trend_rate = proj_components.get("trend")
+            _trend_str = f" {_trend_rate:+.1%}/yr" if _trend_rate is not None else ""
+            _parts.append(f"completions trend{_trend_str} ({_w['trend']:.0%})")
         if "employment" in _w:
             _parts.append(
                 f"BLS employment growth {emp_cagr_for_completions:+.1%}/yr ({_w['employment']:.0%})"
@@ -3208,8 +3215,13 @@ def main():
             _sc_debt = df_sc.dropna(subset=["debt_all_stgp_eval_mdn"])
             med_debt = _sc_debt["debt_all_stgp_eval_mdn"].median() if not _sc_debt.empty else None
 
-            _sc_dte = df_sc.dropna(subset=["debt_to_earnings"])
-            med_dte = _sc_dte["debt_to_earnings"].median() if not _sc_dte.empty else None
+            # Compute D/E from the displayed medians so the ratio is consistent
+            # with the earnings and debt metrics shown (ratio-of-medians, not
+            # median-of-ratios which can diverge due to Simpson's-paradox effects).
+            if med_earn and med_earn > 0 and med_debt is not None:
+                med_dte = med_debt / med_earn
+            else:
+                med_dte = None
 
             sc1, sc2, sc3, sc4 = st.columns(4)
             sc1.metric(
@@ -3242,6 +3254,18 @@ def main():
                 ["Institution", "City", "Control",
                  "Median Earnings (4yr)", "Median Debt", "Debt/Earnings"]
             ].reset_index(drop=True)
+
+            # Check if any selected 6-digit CIPs share the same 4-digit prefix
+            # (Scorecard data is at 4-digit granularity)
+            if cip_patterns:
+                _sc_4digit = {p[:5] for p in cip_patterns if "%" not in p}
+                _sc_6digit = {p for p in cip_patterns if "%" not in p and len(p) > 5}
+                if len(_sc_6digit) > 0 and len(_sc_4digit) < len(_sc_6digit):
+                    st.caption(
+                        f":information_source: College Scorecard reports outcomes at the 4-digit CIP level "
+                        f"(e.g. {sorted(_sc_4digit)[0]}), so results may include related programs "
+                        f"that share the same prefix."
+                    )
 
             st.caption(f"{len(sc_display):,} program–institution combinations with earnings data")
 
