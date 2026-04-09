@@ -2746,15 +2746,15 @@ def main():
         if "trend" in _w:
             _trend_rate = proj_components.get("trend")
             _trend_str = f" {_trend_rate:+.1%}/yr" if _trend_rate is not None else ""
-            _parts.append(f"completions trend{_trend_str} ({_w['trend']:.0%})")
+            _parts.append(f"completions trend{_trend_str}")
         if "employment" in _w:
             _parts.append(
-                f"BLS employment growth {emp_cagr_for_completions:+.1%}/yr ({_w['employment']:.0%})"
+                f"BLS employment growth {emp_cagr_for_completions:+.1%}/yr"
             )
         if "capacity" in _w:
             _cap = proj_components["capacity"]
             _parts.append(
-                f"program capacity {_cap:+.1%}/yr ({_w['capacity']:.0%})"
+                f"program capacity {_cap:+.1%}/yr"
             )
         _blend_rate = proj_components.get("blended_rate")
         _rate_str = f" Blended rate: {_blend_rate:+.1%}/yr." if _blend_rate is not None else ""
