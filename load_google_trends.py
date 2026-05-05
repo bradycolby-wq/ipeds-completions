@@ -34,57 +34,299 @@ TIMEFRAME = "2021-01-01 2026-03-01"  # ~5 years, monthly resolution
 # ── Curated search term overrides for CIP codes with awkward titles ──────────
 CIP_SEARCH_OVERRIDES = {
     "99":       None,   # skip aggregate "all programs"
+
+    # ── Liberal Arts / General ────────────────────────────────────────────────
     "24.0101":  "liberal arts degree",
-    "52.0201":  "business administration degree",
-    "51.3801":  "nursing degree",
-    "42.0101":  "psychology degree",
     "24.0102":  "general studies degree",
-    "26.0101":  "biology degree",
-    "52.0301":  "accounting degree",
-    "51.0801":  "medical assistant certificate",
-    "12.0401":  "cosmetology license",
+    "24.0199":  "liberal arts and sciences degree",
+    "30.0000":  "interdisciplinary studies degree",
+    "30.9999":  "multidisciplinary studies degree",
+
+    # ── Business ──────────────────────────────────────────────────────────────
     "52.0101":  "business degree",
-    "44.0701":  "social work degree",
-    "43.0104":  "criminal justice degree",
-    "51.3901":  "LPN program",
-    "11.0701":  "computer science degree",
+    "52.0201":  "business administration degree",
+    "52.0301":  "accounting degree",
     "52.0801":  "finance degree",
-    "11.0101":  "computer information systems degree",
     "52.1401":  "marketing degree",
-    "14.1901":  "mechanical engineering degree",
-    "48.0508":  "welding certification",
-    "51.0602":  "dental hygiene degree",
-    "13.1202":  "elementary education degree",
-    "51.0000":  "health sciences degree",
-    "27.0101":  "mathematics degree",
-    "51.0912":  "physician assistant program",
-    "23.0101":  "english degree",
-    "40.0501":  "chemistry degree",
-    "45.1001":  "political science degree",
-    "11.0401":  "information technology degree",
-    "09.0100":  "communications degree",
-    "22.0302":  "paralegal certificate",
-    "31.0505":  "kinesiology degree",
-    "13.0101":  "education degree",
-    "51.2001":  "pharmacy degree",
-    "51.0001":  "health professions degree",
-    "51.1201":  "medicine degree",
-    "04.0201":  "architecture degree",
-    "11.0102":  "artificial intelligence degree",
-    "11.0103":  "data science degree",
-    "30.7001":  "data analytics degree",
+    "52.0201":  "business administration degree",
     "52.1301":  "management science degree",
     "52.1101":  "international business degree",
+    "52.0601":  "business analytics degree",
+    "52.0901":  "hospitality management degree",
+    "52.1001":  "human resources degree",
+    "52.0203":  "logistics and supply chain degree",
+    "52.1501":  "real estate degree",
+    "52.0701":  "entrepreneurship degree",
+    "52.0401":  "management information systems degree",
+    "52.0301":  "accounting degree",
+    "52.1601":  "taxation degree",
+    "52.0801":  "finance degree",
+    "52.0299":  "business management degree",
+    "52.1001":  "human resources degree",
+
+    # ── Computer / IT ─────────────────────────────────────────────────────────
+    "11.0701":  "computer science degree",
+    "11.0101":  "computer information systems degree",
+    "11.0401":  "information technology degree",
+    "11.0102":  "artificial intelligence degree",
+    "11.0103":  "data science degree",
+    "11.0201":  "computer programming degree",
+    "11.1003":  "cybersecurity degree",
+    "11.0801":  "web development degree",
+    "11.0804":  "software engineering degree",
+    "11.1001":  "network administration degree",
+    "11.0901":  "computer networking degree",
+    "11.0501":  "computer systems analysis degree",
+    "30.7001":  "data analytics degree",
+    "30.0801":  "math and computer science",
+
+    # ── Engineering ───────────────────────────────────────────────────────────
+    "14.1901":  "mechanical engineering degree",
     "14.0901":  "computer engineering degree",
     "14.1001":  "electrical engineering degree",
     "14.0801":  "civil engineering degree",
-    "30.0801":  "math and computer science",
+    "14.0101":  "engineering degree",
+    "14.0701":  "chemical engineering degree",
+    "14.0201":  "aerospace engineering degree",
+    "14.0301":  "agricultural engineering degree",
+    "14.0501":  "biomedical engineering degree",
+    "14.0801":  "civil engineering degree",
+    "14.1801":  "materials engineering degree",
+    "14.3501":  "industrial engineering degree",
+    "14.2501":  "petroleum engineering degree",
+    "14.0903":  "software engineering degree",
+    "14.4401":  "environmental engineering degree",
+
+    # ── Engineering Technology ────────────────────────────────────────────────
+    "15.0000":  "engineering technology degree",
+    "15.0303":  "electronics technician program",
+    "15.0613":  "manufacturing technology degree",
+    "15.0801":  "aeronautics degree",
+    "15.1001":  "construction management degree",
+    "15.0612":  "industrial technology degree",
+
+    # ── Health / Nursing ──────────────────────────────────────────────────────
+    "51.3801":  "nursing degree",
+    "51.3901":  "LPN program",
+    "51.3805":  "nurse practitioner program",
+    "51.3818":  "nursing administration degree",
+    "51.0000":  "health sciences degree",
+    "51.0001":  "health professions degree",
+    "51.0801":  "medical assistant certificate",
+    "51.0602":  "dental hygiene degree",
+    "51.0912":  "physician assistant program",
+    "51.2001":  "pharmacy degree",
+    "51.1201":  "medicine degree",
     "51.2201":  "public health degree",
-    "54.0101":  "history degree",
+    "51.0707":  "health information management degree",
+    "51.0701":  "health administration degree",
+    "51.0803":  "occupational therapy program",
+    "51.2308":  "physical therapy program",
+    "51.0908":  "respiratory therapy program",
+    "51.0911":  "radiologic technology program",
+    "51.0909":  "surgical technology program",
+    "51.0601":  "dental assistant program",
+    "51.0901":  "cardiovascular technology program",
+    "51.0713":  "medical coding certificate",
+    "51.0716":  "medical billing certificate",
+    "51.0706":  "health information technology degree",
+    "51.0904":  "emergency medical technician program",
+    "51.0907":  "medical lab technician program",
+    "51.1501":  "substance abuse counseling degree",
+    "51.0204":  "speech pathology degree",
+    "51.2306":  "occupational therapy assistant program",
+    "51.0806":  "physical therapy assistant program",
+    "51.3501":  "massage therapy program",
+    "51.1005":  "medical laboratory science degree",
+    "51.2399":  "rehabilitation counseling degree",
+    "51.0910":  "diagnostic medical sonography program",
+    "51.0203":  "audiology degree",
+    "51.2310":  "athletic training degree",
+    "51.3802":  "nursing RN to BSN program",
+    "51.0201":  "pharmacy technician certificate",
+    "51.1401":  "medical scientist degree",
+    "51.2706":  "health and wellness degree",
+    "51.0000":  "health sciences degree",
+    "51.0710":  "medical office administration certificate",
+
+    # ── Education ─────────────────────────────────────────────────────────────
+    "13.0101":  "education degree",
+    "13.1202":  "elementary education degree",
+    "13.1205":  "secondary education degree",
+    "13.1210":  "early childhood education degree",
+    "13.1001":  "special education degree",
+    "13.0401":  "educational leadership degree",
+    "13.0501":  "educational counseling degree",
+    "13.0601":  "educational assessment degree",
+    "13.0301":  "curriculum and instruction degree",
+    "13.1314":  "physical education degree",
+    "13.0603":  "educational technology degree",
+    "13.1501":  "teaching English as second language degree",
+    "13.1312":  "music education degree",
+    "13.1311":  "mathematics education degree",
+    "13.1316":  "science education degree",
+    "13.1305":  "English education degree",
+    "13.0404":  "higher education administration degree",
+    "13.1209":  "kindergarten teacher certification",
+
+    # ── Psychology ────────────────────────────────────────────────────────────
+    "42.0101":  "psychology degree",
+    "42.2801":  "clinical psychology degree",
+    "42.2803":  "counseling psychology degree",
+    "42.2806":  "forensic psychology degree",
+    "42.2807":  "industrial organizational psychology degree",
+    "42.2812":  "school psychology degree",
+
+    # ── Social Sciences ───────────────────────────────────────────────────────
+    "45.1001":  "political science degree",
     "45.1101":  "sociology degree",
-    "40.0801":  "physics degree",
+    "45.0601":  "economics degree",
+    "45.0201":  "anthropology degree",
+    "45.0701":  "geography degree",
+    "45.0401":  "criminology degree",
+
+    # ── Social Work / Human Services ──────────────────────────────────────────
+    "44.0701":  "social work degree",
+    "44.0401":  "public administration degree",
+    "44.0501":  "public policy degree",
+    "44.0000":  "human services degree",
+    "51.1503":  "clinical mental health counseling degree",
+
+    # ── Law / Legal ───────────────────────────────────────────────────────────
+    "22.0101":  "law school",
+    "22.0302":  "paralegal certificate",
+    "22.0206":  "legal studies degree",
+    "43.0104":  "criminal justice degree",
+    "43.0103":  "law enforcement training",
+    "43.0107":  "homeland security degree",
+    "43.0106":  "forensic science degree",
+    "43.0203":  "fire science degree",
+
+    # ── Arts / Humanities ─────────────────────────────────────────────────────
     "50.0409":  "graphic design degree",
+    "50.0101":  "visual arts degree",
+    "50.0901":  "music degree",
+    "50.0501":  "theater degree",
+    "50.0601":  "film degree",
+    "50.0401":  "design degree",
+    "50.0702":  "fine arts degree",
+    "50.0706":  "digital arts degree",
+    "50.0411":  "game design degree",
+    "50.0102":  "digital media degree",
+    "23.0101":  "english degree",
+    "38.0101":  "philosophy degree",
+    "38.0201":  "religion degree",
+    "54.0101":  "history degree",
+    "16.0901":  "French degree",
+    "16.0905":  "Spanish degree",
+    "09.0100":  "communications degree",
+    "09.0401":  "journalism degree",
+    "09.0702":  "public relations degree",
+    "09.0902":  "social media marketing degree",
+
+    # ── Sciences ──────────────────────────────────────────────────────────────
+    "26.0101":  "biology degree",
+    "27.0101":  "mathematics degree",
+    "40.0501":  "chemistry degree",
+    "40.0801":  "physics degree",
+    "40.0601":  "geology degree",
+    "26.0502":  "microbiology degree",
+    "26.0202":  "biochemistry degree",
+    "26.1301":  "ecology degree",
+    "26.0801":  "genetics degree",
+    "26.0908":  "neuroscience degree",
+    "40.0401":  "atmospheric science degree",
+    "03.0103":  "environmental science degree",
+    "03.0104":  "environmental studies degree",
+    "03.0601":  "wildlife management degree",
+    "03.0502":  "forestry degree",
+    "03.0201":  "natural resources management degree",
+    "30.1801":  "sustainability degree",
+
+    # ── Trades / Vocational ───────────────────────────────────────────────────
+    "48.0508":  "welding certification",
+    "12.0401":  "cosmetology license",
+    "46.0302":  "electrician training",
+    "46.0503":  "plumbing training",
+    "47.0201":  "HVAC certification",
+    "47.0604":  "auto mechanic training",
+    "46.0101":  "construction trades program",
+    "48.0501":  "machinist training",
+    "46.0201":  "carpentry training",
+    "49.0205":  "CDL truck driving school",
+    "12.0503":  "culinary arts program",
+    "12.0504":  "pastry chef program",
+    "12.0500":  "cooking and culinary arts school",
+    "47.0303":  "industrial maintenance training",
+    "47.0110":  "diesel mechanic training",
+    "15.0501":  "HVAC technology program",
+    "46.0000":  "construction management certificate",
+    "48.0510":  "CNC machining program",
+    "12.0402":  "barbering license",
+    "12.0406":  "esthetician training",
+    "12.0410":  "nail technician training",
+
+    # ── Agriculture ───────────────────────────────────────────────────────────
+    "01.0000":  "agriculture degree",
+    "01.0101":  "agricultural business degree",
+    "01.0901":  "animal science degree",
+    "01.1101":  "plant science degree",
+    "01.0605":  "landscape architecture degree",
+    "01.0701":  "agriculture science degree",
+    "01.0801":  "agricultural economics degree",
+    "01.8101":  "veterinary technician program",
+
+    # ── Architecture / Planning ───────────────────────────────────────────────
+    "04.0201":  "architecture degree",
+    "04.0301":  "urban planning degree",
+    "04.0501":  "interior design degree",
+
+    # ── Parks / Recreation / Fitness ──────────────────────────────────────────
+    "31.0505":  "kinesiology degree",
+    "31.0504":  "sport management degree",
+    "31.0501":  "health and physical education degree",
+    "31.0507":  "personal trainer certification",
+    "31.0101":  "recreation management degree",
+
+    # ── Theology / Ministry ───────────────────────────────────────────────────
+    "39.0601":  "theology degree",
+    "39.0701":  "pastoral ministry degree",
+    "39.0201":  "divinity degree",
+
+    # ── Military / Homeland Security ──────────────────────────────────────────
+    "29.0101":  "military science degree",
+    "43.0302":  "intelligence studies degree",
+
+    # ── Library Science ───────────────────────────────────────────────────────
+    "25.0101":  "library science degree",
+
+    # ── Family / Consumer Sciences ────────────────────────────────────────────
+    "19.0707":  "family counseling degree",
+    "19.0101":  "family and consumer sciences degree",
+    "19.0706":  "child development degree",
 }
+
+
+# ── Smarter suffix logic for auto-generated search terms ─────────────────────
+# CIP 2-digit families that are typically trade/vocational programs
+_TRADE_FAMILIES = {"12", "46", "47", "48", "49"}
+# CIP 2-digit families where "program" is a better suffix than "degree"
+_PROGRAM_FAMILIES = {"51"}  # health — many are certificates/programs
+# Specific 4-digit CIP prefixes that are certificate-oriented
+_CERT_PREFIXES = {
+    "51.08", "51.06", "51.09", "51.07", "51.02",  # health tech / assisting
+    "51.39",  # LPN/LVN
+    "22.03",  # paralegal
+    "15.03", "15.04",  # engineering tech
+    "10.02", "10.03",  # communications tech
+}
+# Keywords in CIP titles that signal non-degree programs
+_CERT_TITLE_KEYWORDS = {
+    "technician", "technologist", "assistant", "aide", "helper",
+    "operator", "mechanic", "repairer", "installer",
+}
+# Title words to strip because they add noise to search terms
+_NOISE_WORDS = {"general", "other", "all other", "not elsewhere classified"}
 
 
 # ── CIP-to-search-term mapping ───────────────────────────────────────────────
@@ -92,18 +334,70 @@ CIP_SEARCH_OVERRIDES = {
 def cip_to_search_term(cipcode: str, ciptitle: str) -> str | None:
     """Map a CIP code to a Google Trends search term.
 
+    Uses context-aware suffix selection:
+      - Trades (CIP 12/46/47/48/49): "training" or "certification"
+      - Health tech / assisting roles: "program" or "certificate"
+      - Title contains technician/assistant/aide: "program"
+      - Everything else: "degree"
+
     Returns None for CIP codes that should be skipped.
     """
     if cipcode in CIP_SEARCH_OVERRIDES:
         return CIP_SEARCH_OVERRIDES[cipcode]
     if not ciptitle or ciptitle == cipcode:
         return None
-    # Take first phrase before comma, append "degree"
+
+    # Clean the title: take first phrase before comma, strip parentheticals
     clean = ciptitle.split(",")[0].strip()
     clean = re.sub(r'\s*\([^)]*\)', '', clean).strip()
+    # Take first option before slash if the result would still be 3+ chars
+    # e.g. "Botany/Plant Biology" -> "Botany", "Pharmacy Technician/Assistant" -> "Pharmacy Technician"
+    if "/" in clean:
+        first_part = clean.split("/")[0].strip()
+        if len(first_part) >= 3:
+            clean = first_part
+    # Remove noise words like "General" or "Other"
+    for noise in _NOISE_WORDS:
+        clean = re.sub(rf'\b{noise}\b', '', clean, flags=re.IGNORECASE).strip()
+    # Strip trailing "Technologies" / "Technology" — people don't search that way
+    clean = re.sub(r'\s+Technolog(y|ies)$', '', clean, flags=re.IGNORECASE).strip()
+    # Strip trailing "Services"
+    clean = re.sub(r'\s+Services$', '', clean, flags=re.IGNORECASE).strip()
+    # Collapse whitespace
+    clean = re.sub(r'\s+', ' ', clean).strip()
+
     if len(clean) < 3:
         return None
-    return f"{clean} degree".lower()
+
+    # Cap length — overly long search terms get zero volume on Google Trends
+    words = clean.split()
+    if len(words) > 5:
+        clean = " ".join(words[:5])
+
+    clean_lower = clean.lower()
+    family = cipcode[:2]       # e.g. "51"
+    prefix = cipcode[:5]       # e.g. "51.08"
+
+    # Pick the right suffix based on program type
+    if family in _TRADE_FAMILIES:
+        suffix = "training"
+    elif prefix in _CERT_PREFIXES:
+        suffix = "program"
+    elif any(kw in clean_lower for kw in _CERT_TITLE_KEYWORDS):
+        suffix = "program"
+    elif family in _PROGRAM_FAMILIES:
+        # Health family — default to "degree" for broader programs,
+        # but many sub-fields already caught by _CERT_PREFIXES above
+        suffix = "degree"
+    else:
+        suffix = "degree"
+
+    # Avoid redundancy: don't append "degree" if title already ends with it
+    if clean_lower.endswith((" degree", " program", " training",
+                              " certificate", " certification")):
+        return clean_lower
+
+    return f"{clean_lower} {suffix}"
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────

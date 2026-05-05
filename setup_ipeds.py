@@ -25,13 +25,18 @@ ZIPS_DIR   = OUTPUT_DIR / "zips"
 RAW_DIR    = OUTPUT_DIR / "raw"
 DB_PATH    = OUTPUT_DIR / "ipeds.db"
 BASE_URL   = "https://nces.ed.gov/ipeds/datacenter/data/"
-YEARS      = list(range(2014, 2024))   # 2014-15 through 2023-24
+YEARS      = list(range(2014, 2025))   # AY 2013-14 through 2023-24
+# Note on year semantics: IPEDS file C{YYYY}_A reports awards conferred
+# between July of YYYY-1 and June of YYYY (academic year (YYYY-1)-YYYY).
+# We store the file's YYYY directly in the `year` column, so DB year=2024
+# means AY 2023-24. Keep this in mind when joining to non-IPEDS datasets
+# that use the start-of-AY convention.
 
 # ---------------------------------------------------------------------------
 # Lookup tables
 # ---------------------------------------------------------------------------
 AWARD_LEVELS = {
-    1:  "Less than 1-year certificate",
+    1:  "Less than 1-year certificate (pre-2020)",
     2:  "1-2 year certificate",
     3:  "Associate's degree",
     4:  "2-4 year certificate",
@@ -42,6 +47,8 @@ AWARD_LEVELS = {
     17: "Doctor's degree - Research/Scholarship",
     18: "Doctor's degree - Professional Practice",
     19: "Doctor's degree - Other",
+    20: "Certificate - under 300 clock hours (2020+)",
+    21: "Certificate - 300 to 899 clock hours (2020+)",
 }
 
 SECTORS = {

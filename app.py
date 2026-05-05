@@ -1,6 +1,9 @@
 """
 IPEDS Completions Explorer
-Streamlit app — academic years 2014-15 through 2023-24
+Streamlit app — academic years 2013-14 through 2022-23
+(IPEDS file C{YYYY}_A reports awards conferred July YYYY-1 through June YYYY,
+i.e. AY (YYYY-1)-YYYY. The DB stores the file's YYYY in the `year` column,
+so DB year=2023 means AY 2022-23. Re-run setup_ipeds.py to load AY 2023-24.)
 """
 
 import sqlite3
@@ -26,6 +29,18 @@ except ImportError:
     _HAS_STATSMODELS = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
+# Feature flag: hide the Job Posting Trends section from the UI. The Coresignal
+# backend (run_coresignal_trend, _resolve_coresignal_titles, etc. ~line 1290+)
+# stays available and can be exercised programmatically — only the rendering
+# block in main() is gated on this flag. Flip to True to re-expose the section.
+SHOW_JOB_POSTINGS_UI = False
+
+# Feature flag: hide the Distance Education section from the UI. The DEP query
+# helpers (run_dep_query, run_dep_by_state_query) and the export pipeline
+# entry stay loaded — only the rendering block is gated. Flip to True to
+# re-expose the section.
+SHOW_DISTANCE_EDUCATION_UI = False
+
 # GitHub Release URL for the database (used on Streamlit Community Cloud)
 _GITHUB_DB_URL = (
     "https://github.com/bradycolby-wq/ipeds-completions/releases/"
@@ -88,7 +103,7 @@ if not st.user.email or not st.user.email.lower().endswith(f"@{ALLOWED_DOMAIN}")
 # ── Reference data ────────────────────────────────────────────────────────────
 
 AWARD_LEVELS = {
-    1:  "Less than 1-year certificate",
+    1:  "Less than 1-year certificate (pre-2020)",
     2:  "1–2 year certificate",
     3:  "Associate's degree",
     4:  "2–4 year certificate",
@@ -99,6 +114,8 @@ AWARD_LEVELS = {
     17: "Doctorate – Research/Scholarship",
     18: "Doctorate – Professional Practice",
     19: "Doctorate – Other",
+    20: "Certificate – under 300 clock hours (2020+)",
+    21: "Certificate – 300 to 899 clock hours (2020+)",
 }
 
 CHART_COLORS = [
@@ -119,6 +136,9 @@ STABBR_TO_FIPS = {
     "WV": "54", "WI": "55", "WY": "56",
 }
 
+# Inverse — used to map OES area_code (FIPS) back to state abbreviations.
+FIPS_TO_STABBR = {fips: abbr for abbr, fips in STABBR_TO_FIPS.items()}
+
 # Territories excluded from the platform
 EXCLUDED_TERRITORIES = {"PR", "VI", "GU", "AS", "MP", "MH", "FM", "PW"}
 
@@ -127,6 +147,164 @@ EMPLOYMENT_COLORS = [
     "#333333", "#8B5CF6", "#10B981", "#EF4444", "#F59E0B",
     "#6366F1", "#EC4899", "#14B8A6", "#F97316", "#8B5CF6",
 ]
+
+# VI brand palette derived from the primary orange (#f26822).
+# Used for sequential choropleths so all maps share visual language.
+VI_BRAND_ORANGE = "#f26822"
+VI_BRAND_BLUE = "#0f86c1"
+VI_INK = "#1F2937"
+VI_MUTED = "#6B7280"
+VI_HAIRLINE = "#E5E7EB"
+
+VI_CHOROPLETH_SCALE = [
+    [0.00, "#FFF5EE"],
+    [0.20, "#FCD7B4"],
+    [0.45, "#F9A66B"],
+    [0.70, "#F26822"],
+    [1.00, "#A03D0A"],
+]
+
+
+def vi_choropleth(
+    locations,
+    values,
+    *,
+    title: str,
+    colorbar_title: str = "",
+    hover_format: str = "{:,.0f}",
+    hover_label: str = "Value",
+    height: int = 360,
+):
+    """Return a VI-branded US-states choropleth Plotly figure.
+
+    locations: iterable of 2-letter state abbreviations.
+    values:    iterable of numeric values, same length as locations.
+    """
+    hover_template = (
+        f"<b>%{{location}}</b><br>{hover_label}: %{{customdata}}"
+        "<extra></extra>"
+    )
+    if hover_format.endswith("%}"):
+        # Already a percent format string like "{:.1f}%"
+        custom = [hover_format.format(v) if v is not None else "—" for v in values]
+    else:
+        custom = [
+            hover_format.format(v) if (v is not None and pd.notna(v)) else "—"
+            for v in values
+        ]
+
+    fig = go.Figure(go.Choropleth(
+        locations=list(locations),
+        z=list(values),
+        customdata=custom,
+        locationmode="USA-states",
+        colorscale=VI_CHOROPLETH_SCALE,
+        marker=dict(line=dict(color="white", width=0.6)),
+        colorbar=dict(
+            title=dict(text=colorbar_title, font=dict(size=11, color=VI_MUTED)),
+            thickness=10,
+            len=0.6,
+            outlinewidth=0,
+            tickfont=dict(size=10, color=VI_MUTED),
+        ),
+        hovertemplate=hover_template,
+    ))
+    fig.update_layout(
+        title=dict(
+            text=f"<b>{title}</b>",
+            font=dict(size=14, color=VI_INK),
+            x=0, xanchor="left",
+        ),
+        geo=dict(
+            scope="usa",
+            bgcolor="white",
+            lakecolor="white",
+            showlakes=True,
+            landcolor="#FAFAFA",
+            subunitcolor="white",
+            projection_type="albers usa",
+        ),
+        height=height,
+        margin=dict(t=46, b=8, l=8, r=8),
+        paper_bgcolor="white",
+        font=dict(family="Montserrat, Arial, sans-serif", size=12, color=VI_INK),
+    )
+    return fig
+
+
+def vi_ranking_bar(
+    labels,
+    values,
+    *,
+    title: str,
+    value_label: str = "Value",
+    value_format: str = "{:,.0f}",
+    height: int = 360,
+    truncate_label_at: int = 28,
+):
+    """Horizontal bar chart for a state/metro ranking next to a choropleth.
+
+    Sorted descending by `values` (passed in any order — sorted internally).
+    Top of the chart = largest value. Bars use the VI primary orange.
+    """
+    df = pd.DataFrame({"label": list(labels), "value": list(values)})
+    df = df.dropna(subset=["value"])
+    if df.empty:
+        return None
+    # Sort descending; keep the top entries. Reverse so Plotly renders the
+    # largest at the TOP of a horizontal bar chart.
+    df = df.sort_values("value", ascending=True)
+
+    def _truncate(s: str) -> str:
+        s = str(s)
+        if len(s) <= truncate_label_at + 2:
+            return s
+        return s[:truncate_label_at] + "…"
+
+    df["display_label"] = df["label"].apply(_truncate)
+    df["text"] = df["value"].apply(
+        lambda v: value_format.format(v) if pd.notna(v) else ""
+    )
+
+    fig = go.Figure(go.Bar(
+        x=df["value"],
+        y=df["display_label"],
+        orientation="h",
+        marker=dict(
+            color=VI_BRAND_ORANGE,
+            line=dict(color="white", width=0.5),
+        ),
+        text=df["text"],
+        textposition="outside",
+        textfont=dict(
+            size=10, family="Montserrat, Arial, sans-serif", color=VI_INK,
+        ),
+        cliponaxis=False,
+        hovertemplate=(
+            f"<b>%{{customdata}}</b><br>{value_label}: %{{text}}<extra></extra>"
+        ),
+        customdata=df["label"],
+    ))
+    fig.update_layout(
+        title=dict(
+            text=f"<b>{title}</b>",
+            font=dict(size=14, color=VI_INK),
+            x=0, xanchor="left",
+        ),
+        xaxis=dict(
+            title="", showgrid=True, gridcolor="#F3F4F6",
+            tickformat=",", showline=False, zeroline=False,
+        ),
+        yaxis=dict(title="", showgrid=False, automargin=True),
+        height=height,
+        margin=dict(t=46, b=20, l=4, r=40),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(family="Montserrat, Arial, sans-serif", size=11, color=VI_INK),
+        bargap=0.18,
+    )
+    return fig
+
 
 # ── NCES projection constants ────────────────────────────────────────────────
 # Maps IPEDS award level codes to NCES projection categories
@@ -140,8 +318,12 @@ NCES_CATEGORY_MAP = {
 }
 
 # NCES Projections of Education Statistics to 2032, Table 318.10
-# Projected total degrees conferred nationally, by category and academic year
-# year key = start of academic year (e.g. 2024 = 2024-25)
+# Projected total degrees conferred nationally, by category and academic year.
+# Year key follows NCES convention: year = START of academic year
+#   (e.g. 2024 = AY 2024-25).
+# Note: this differs from our IPEDS DB convention, where year = END of AY
+#   (e.g. DB year 2025 = AY 2024-25). When looking these up against DB years
+#   we bridge with `nces_year = db_year - 1` (see `_nces_growth_index`).
 NCES_PROJECTIONS = {
     "associates": {2024: 1029185, 2025: 1047212, 2026: 1067132, 2027: 1085468, 2028: 1100217},
     "bachelors":  {2024: 2167569, 2025: 2217039, 2026: 2270050, 2027: 2319984, 2028: 2363718},
@@ -166,6 +348,83 @@ def ensure_cbsa_index():
         conn.close()
     except sqlite3.OperationalError:
         pass  # read-only filesystem; index should already exist
+
+
+def ensure_award_levels():
+    """Ensure award_levels table has 2020+ codes 20 and 21 so the completions
+    view populates award_level_name for them. Silently skip if DB is read-only."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.executemany(
+            "INSERT OR REPLACE INTO award_levels VALUES (?, ?)",
+            [(k, v) for k, v in AWARD_LEVELS.items() if k in (20, 21)],
+        )
+        conn.commit()
+        conn.close()
+    except sqlite3.OperationalError:
+        pass
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_data_windows() -> dict:
+    """Return the actual year/date span of each data source in the DB.
+
+    Used by footnotes so the displayed coverage stays in sync with whatever
+    data has been loaded, instead of hardcoded year ranges that drift after
+    the next IPEDS / OES / Scorecard refresh.
+
+    Keys: completions, dep, oes, scorecard_status, trends.
+    Each value is a (min, max) tuple of ints (years) or strings (dates),
+    or None if the table doesn't exist / is empty.
+    """
+    conn = get_conn()
+    out = {
+        "completions": None, "dep": None, "oes": None,
+        "scorecard_status": None, "trends": None,
+    }
+    try:
+        out["completions"] = conn.execute(
+            "SELECT MIN(year), MAX(year) FROM completions"
+        ).fetchone()
+    except Exception:
+        pass
+    try:
+        out["dep"] = conn.execute(
+            "SELECT MIN(year), MAX(year) FROM completions_dep"
+        ).fetchone()
+    except Exception:
+        pass
+    try:
+        out["oes"] = conn.execute(
+            "SELECT MIN(year), MAX(year) FROM oes_employment"
+        ).fetchone()
+    except Exception:
+        pass
+    try:
+        # College Scorecard FoS file is a "most-recent cohorts" snapshot
+        # without a per-row year, so we just confirm presence.
+        cnt = conn.execute(
+            "SELECT COUNT(*) FROM college_scorecard"
+        ).fetchone()[0]
+        out["scorecard_status"] = "present" if cnt else None
+    except Exception:
+        pass
+    try:
+        out["trends"] = conn.execute(
+            "SELECT MIN(date), MAX(date) FROM google_trends_time"
+        ).fetchone()
+    except Exception:
+        pass
+    conn.close()
+    return out
+
+
+def _ay_label(year_end: int) -> str:
+    """Render an IPEDS DB year (= end of academic year) as 'YYYY-YY'.
+
+    DB convention: year=2024 ⇒ AY 2023-24.
+    """
+    return f"{year_end - 1}–{str(year_end)[-2:]}"
 
 
 @st.cache_data(show_spinner=False)
@@ -202,12 +461,21 @@ def load_cbsas():
 
 @st.cache_data(show_spinner=False)
 def load_cip_options():
-    """Return sorted list of (cipcode, display_label) for all codes with data."""
+    """Return sorted list of (cipcode, display_label) for all codes with data.
+
+    Retired CIP 2010 codes (those remapped to a new CIP 2020 code) are
+    hidden — their historical data is pulled in via expand_cip_patterns()
+    when the user picks the current CIP 2020 code.
+    """
     conn = get_conn()
     rows = conn.execute("""
         SELECT c.cipcode, COALESCE(t.ciptitle, c.cipcode) AS title
         FROM (SELECT DISTINCT cipcode FROM completions) c
         LEFT JOIN cip_taxonomy t ON c.cipcode = t.cipcode
+        WHERE c.cipcode NOT IN (
+            SELECT old_cipcode FROM cip_crosswalk
+            WHERE old_cipcode != '__CHECKED__'
+        )
         ORDER BY c.cipcode
     """).fetchall()
     conn.close()
@@ -232,17 +500,46 @@ def load_cip_crosswalk() -> dict[str, list[str]]:
     return result
 
 
+@st.cache_data(show_spinner=False)
+def load_cip_crosswalk_reverse() -> dict[str, list[str]]:
+    """Return mapping: old_cipcode -> [new_cipcode, ...] from the crosswalk table."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT new_cipcode, old_cipcode FROM cip_crosswalk "
+            "WHERE old_cipcode != '__CHECKED__'"
+        ).fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+    result: dict[str, list[str]] = {}
+    for new, old in rows:
+        result.setdefault(old, []).append(new)
+    return result
+
+
 def expand_cip_patterns(cip_patterns: tuple) -> tuple:
-    """Add predecessor CIP 2010 codes for any selected CIP 2020 codes."""
+    """Add predecessor and successor CIP codes for any selected exact codes.
+
+    Expansion is bidirectional: a CIP 2020 code gets its CIP 2010 predecessors
+    added, and a retired CIP 2010 code gets its CIP 2020 successor added, so
+    the query spans the full 2014–2023 window regardless of which taxonomy
+    the selected code belongs to.
+    """
     if not cip_patterns:
         return cip_patterns
-    crosswalk = load_cip_crosswalk()
+    forward = load_cip_crosswalk()
+    reverse = load_cip_crosswalk_reverse()
     expanded = list(cip_patterns)
     for code in cip_patterns:
-        if "%" not in code:  # only exact codes have crosswalk entries
-            for old in crosswalk.get(code, []):
-                if old not in expanded:
-                    expanded.append(old)
+        if "%" in code:  # only exact codes have crosswalk entries
+            continue
+        for old in forward.get(code, []):
+            if old not in expanded:
+                expanded.append(old)
+        for new in reverse.get(code, []):
+            if new not in expanded:
+                expanded.append(new)
     return tuple(expanded)
 
 
@@ -274,10 +571,14 @@ def _nces_growth_index(selected_awlevels, proj_years):
     if not cats:
         return None
 
-    # Combined NCES totals by year
+    # Combined NCES totals by year.
+    # Bridge between conventions: our `proj_years` use the DB convention
+    # (year = end of AY); NCES_PROJECTIONS keys use NCES convention
+    # (year = start of AY). For DB year Y (= AY (Y-1)-Y) the matching NCES
+    # key is Y-1.
     nces = {}
     for y in proj_years:
-        nces[y] = sum(NCES_PROJECTIONS.get(c, {}).get(y, 0) for c in cats)
+        nces[y] = sum(NCES_PROJECTIONS.get(c, {}).get(y - 1, 0) for c in cats)
 
     first_y, last_y = proj_years[0], proj_years[-1]
     if nces.get(first_y, 0) <= 0:
@@ -933,6 +1234,668 @@ def run_dep_query(
     return df
 
 
+@st.cache_data(show_spinner=False)
+def run_completions_by_state_query(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    year: int,
+):
+    """Total completions by state for a single year, across all 50 + DC.
+
+    Returns DataFrame with columns: stabbr, completions.
+    """
+    cip_patterns = expand_cip_patterns(cip_patterns)
+    conn = get_conn()
+
+    params = [year]
+    where = ["c.year = ?"]
+
+    if cip_patterns:
+        cip_clauses = []
+        for p in cip_patterns:
+            cip_clauses.append("c.cipcode LIKE ?" if "%" in p else "c.cipcode = ?")
+            params.append(p)
+        where.append(f"({' OR '.join(cip_clauses)})")
+
+    if awlevels:
+        placeholders = ",".join("?" * len(awlevels))
+        where.append(f"c.awlevel IN ({placeholders})")
+        params.extend(awlevels)
+
+    excluded = ",".join(f"'{s}'" for s in EXCLUDED_TERRITORIES)
+    where.append(f"i.stabbr NOT IN ({excluded})")
+    where.append("i.stabbr IS NOT NULL AND i.stabbr != ''")
+
+    sql = f"""
+        SELECT i.stabbr AS stabbr, SUM(c.ctotalt) AS completions
+        FROM completions c
+        INNER JOIN institutions i
+          ON c.unitid = i.unitid AND c.year = i.year
+        WHERE {' AND '.join(where)}
+        GROUP BY i.stabbr
+        ORDER BY completions DESC
+    """
+    df = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def run_completions_by_metro_query(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    year: int,
+    top_n: int = 25,
+):
+    """Top metros by completions for a single year.
+
+    Returns DataFrame: cbsa, cbsa_name, completions (sorted desc).
+    Excludes institutions with no CBSA assignment (rural).
+    """
+    cip_patterns = expand_cip_patterns(cip_patterns)
+    conn = get_conn()
+
+    params = [year]
+    where = ["c.year = ?"]
+
+    if cip_patterns:
+        cip_clauses = []
+        for p in cip_patterns:
+            cip_clauses.append("c.cipcode LIKE ?" if "%" in p else "c.cipcode = ?")
+            params.append(p)
+        where.append(f"({' OR '.join(cip_clauses)})")
+
+    if awlevels:
+        placeholders = ",".join("?" * len(awlevels))
+        where.append(f"c.awlevel IN ({placeholders})")
+        params.extend(awlevels)
+
+    excluded = ",".join(f"'{s}'" for s in EXCLUDED_TERRITORIES)
+    where.append(f"i.stabbr NOT IN ({excluded})")
+    where.append("i.cbsa IS NOT NULL")
+    where.append("CAST(i.cbsa AS INTEGER) > 0")
+
+    params.append(top_n)
+    sql = f"""
+        SELECT
+            i.cbsa AS cbsa,
+            COALESCE(n.cbsanm, i.cbsa) AS cbsa_name,
+            SUM(c.ctotalt) AS completions
+        FROM completions c
+        INNER JOIN institutions i
+          ON c.unitid = i.unitid AND c.year = i.year
+        LEFT JOIN cbsa_names n ON i.cbsa = n.cbsa
+        WHERE {' AND '.join(where)}
+        GROUP BY i.cbsa
+        HAVING completions > 0
+        ORDER BY completions DESC
+        LIMIT ?
+    """
+    df = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def run_employment_by_metro_query(soc_codes: tuple, year: int, top_n: int = 25):
+    """Top metros by total employment for the given SOC codes in a single year.
+
+    Returns DataFrame: cbsa, cbsa_name, tot_emp (sorted desc).
+    OES area_type=4 = metro; BLS area_code is 00 + 5-digit CBSA. Aggregates
+    across all matched occupations.
+    """
+    if not soc_codes:
+        return pd.DataFrame()
+    conn = get_conn()
+    soc_ph = ",".join("?" * len(soc_codes))
+    sql = f"""
+        SELECT
+            area_code,
+            MAX(area_title) AS area_title,
+            SUM(tot_emp) AS tot_emp
+        FROM oes_employment
+        WHERE year = ?
+          AND area_type = 4
+          AND occ_code IN ({soc_ph})
+          AND tot_emp IS NOT NULL
+        GROUP BY area_code
+        HAVING tot_emp > 0
+        ORDER BY tot_emp DESC
+        LIMIT ?
+    """
+    df = pd.read_sql_query(sql, conn, params=[year] + list(soc_codes) + [top_n])
+    conn.close()
+    if df.empty:
+        return df
+    # BLS area_code is 7-digit "00" + 5-digit CBSA — strip the leading "00".
+    df["cbsa"] = df["area_code"].astype(str).str.zfill(7).str[2:]
+    df["cbsa_name"] = df["area_title"]
+    return df[["cbsa", "cbsa_name", "tot_emp"]].reset_index(drop=True)
+
+
+# ── Growth queries (post-COVID CAGR per geography) ──────────────────────────
+
+def _cagr(start, end, years):
+    """Compound annual growth rate as a decimal (e.g. 0.05 = 5%/yr).
+
+    Returns NaN if either bookend is non-positive or the span is zero.
+    """
+    if start is None or end is None or years <= 0:
+        return float("nan")
+    if start <= 0 or end <= 0:
+        return float("nan")
+    return (end / start) ** (1.0 / years) - 1.0
+
+
+@st.cache_data(show_spinner=False)
+def run_completions_state_cagr(
+    cip_patterns: tuple, awlevels: tuple, base_year: int, end_year: int,
+):
+    """CAGR by state from `base_year` to `end_year`. Decimal cagr.
+
+    Used by the Completions Growth (post-COVID CAGR) view. Returns
+    DataFrame: stabbr, base, end, cagr.
+    """
+    cip_patterns = expand_cip_patterns(cip_patterns)
+    conn = get_conn()
+    params = [base_year, end_year]
+    where = ["c.year IN (?, ?)"]
+
+    if cip_patterns:
+        cc = []
+        for p in cip_patterns:
+            cc.append("c.cipcode LIKE ?" if "%" in p else "c.cipcode = ?")
+            params.append(p)
+        where.append(f"({' OR '.join(cc)})")
+
+    if awlevels:
+        ph = ",".join("?" * len(awlevels))
+        where.append(f"c.awlevel IN ({ph})")
+        params.extend(awlevels)
+
+    excluded = ",".join(f"'{s}'" for s in EXCLUDED_TERRITORIES)
+    where.append(f"i.stabbr NOT IN ({excluded})")
+    where.append("i.stabbr IS NOT NULL AND i.stabbr != ''")
+
+    sql = f"""
+        SELECT i.stabbr AS stabbr, c.year AS year,
+               SUM(c.ctotalt) AS completions
+        FROM completions c
+        INNER JOIN institutions i
+          ON c.unitid = i.unitid AND c.year = i.year
+        WHERE {' AND '.join(where)}
+        GROUP BY i.stabbr, c.year
+    """
+    raw = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+    if raw.empty:
+        return raw
+
+    pivot = raw.pivot(index="stabbr", columns="year", values="completions")
+    span = end_year - base_year
+    pivot["base"] = pivot.get(base_year)
+    pivot["end"] = pivot.get(end_year)
+    pivot["cagr"] = pivot.apply(
+        lambda r: _cagr(r["base"], r["end"], span), axis=1,
+    )
+    return (
+        pivot.reset_index()[["stabbr", "base", "end", "cagr"]]
+        .sort_values("cagr", ascending=False, na_position="last")
+        .reset_index(drop=True)
+    )
+
+
+@st.cache_data(show_spinner=False)
+def run_completions_metro_cagr(
+    cip_patterns: tuple, awlevels: tuple,
+    base_year: int, end_year: int, top_n: int = 25,
+):
+    """CAGR by CBSA from base_year → end_year. Top-N by end-year volume."""
+    cip_patterns = expand_cip_patterns(cip_patterns)
+    conn = get_conn()
+    params = [base_year, end_year]
+    where = ["c.year IN (?, ?)"]
+
+    if cip_patterns:
+        cc = []
+        for p in cip_patterns:
+            cc.append("c.cipcode LIKE ?" if "%" in p else "c.cipcode = ?")
+            params.append(p)
+        where.append(f"({' OR '.join(cc)})")
+
+    if awlevels:
+        ph = ",".join("?" * len(awlevels))
+        where.append(f"c.awlevel IN ({ph})")
+        params.extend(awlevels)
+
+    excluded = ",".join(f"'{s}'" for s in EXCLUDED_TERRITORIES)
+    where.append(f"i.stabbr NOT IN ({excluded})")
+    where.append("i.cbsa IS NOT NULL AND CAST(i.cbsa AS INTEGER) > 0")
+
+    sql = f"""
+        SELECT i.cbsa AS cbsa,
+               COALESCE(n.cbsanm, i.cbsa) AS cbsa_name,
+               c.year AS year,
+               SUM(c.ctotalt) AS completions
+        FROM completions c
+        INNER JOIN institutions i
+          ON c.unitid = i.unitid AND c.year = i.year
+        LEFT JOIN cbsa_names n ON i.cbsa = n.cbsa
+        WHERE {' AND '.join(where)}
+        GROUP BY i.cbsa, c.year
+    """
+    raw = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+    if raw.empty:
+        return raw
+
+    meta = raw.drop_duplicates("cbsa")[["cbsa", "cbsa_name"]]
+    pivot = raw.pivot(index="cbsa", columns="year", values="completions")
+    span = end_year - base_year
+    pivot["base"] = pivot.get(base_year)
+    pivot["end"] = pivot.get(end_year)
+    pivot["cagr"] = pivot.apply(
+        lambda r: _cagr(r["base"], r["end"], span), axis=1,
+    )
+    out = pivot.reset_index().merge(meta, on="cbsa", how="left")
+    # Filter: require at least 50 completions in end-year for noise control.
+    out = out[out["end"].fillna(0) >= 50]
+    out = out.dropna(subset=["cagr"])
+    out = out.sort_values("cagr", ascending=False).head(top_n).reset_index(drop=True)
+    return out[["cbsa", "cbsa_name", "base", "end", "cagr"]]
+
+
+@st.cache_data(show_spinner=False)
+def run_employment_state_cagr(
+    soc_codes: tuple, base_year: int, end_year: int,
+):
+    """OES total-employment CAGR by state from base_year → end_year."""
+    if not soc_codes:
+        return pd.DataFrame()
+    conn = get_conn()
+    soc_ph = ",".join("?" * len(soc_codes))
+    sql = f"""
+        SELECT area_code, year, SUM(tot_emp) AS tot_emp
+        FROM oes_employment
+        WHERE year IN (?, ?)
+          AND area_type = 2
+          AND occ_code IN ({soc_ph})
+          AND tot_emp IS NOT NULL
+        GROUP BY area_code, year
+    """
+    raw = pd.read_sql_query(
+        sql, conn, params=[base_year, end_year] + list(soc_codes),
+    )
+    conn.close()
+    if raw.empty:
+        return raw
+
+    raw["stabbr"] = raw["area_code"].map(FIPS_TO_STABBR)
+    raw = raw.dropna(subset=["stabbr"])
+    raw = raw[~raw["stabbr"].isin(EXCLUDED_TERRITORIES)]
+
+    pivot = raw.pivot(index="stabbr", columns="year", values="tot_emp")
+    span = end_year - base_year
+    pivot["base"] = pivot.get(base_year)
+    pivot["end"] = pivot.get(end_year)
+    pivot["cagr"] = pivot.apply(
+        lambda r: _cagr(r["base"], r["end"], span), axis=1,
+    )
+    return (
+        pivot.reset_index()[["stabbr", "base", "end", "cagr"]]
+        .sort_values("cagr", ascending=False, na_position="last")
+        .reset_index(drop=True)
+    )
+
+
+@st.cache_data(show_spinner=False)
+def run_employment_metro_cagr(
+    soc_codes: tuple, base_year: int, end_year: int, top_n: int = 25,
+):
+    """OES total-employment CAGR by metro (CBSA) from base_year → end_year."""
+    if not soc_codes:
+        return pd.DataFrame()
+    conn = get_conn()
+    soc_ph = ",".join("?" * len(soc_codes))
+    sql = f"""
+        SELECT area_code, MAX(area_title) AS area_title, year,
+               SUM(tot_emp) AS tot_emp
+        FROM oes_employment
+        WHERE year IN (?, ?)
+          AND area_type = 4
+          AND occ_code IN ({soc_ph})
+          AND tot_emp IS NOT NULL
+        GROUP BY area_code, year
+    """
+    raw = pd.read_sql_query(
+        sql, conn, params=[base_year, end_year] + list(soc_codes),
+    )
+    conn.close()
+    if raw.empty:
+        return raw
+
+    raw["cbsa"] = raw["area_code"].astype(str).str.zfill(7).str[2:]
+    meta = raw.drop_duplicates("cbsa")[["cbsa", "area_title"]].rename(
+        columns={"area_title": "cbsa_name"}
+    )
+    pivot = raw.pivot(index="cbsa", columns="year", values="tot_emp")
+    span = end_year - base_year
+    pivot["base"] = pivot.get(base_year)
+    pivot["end"] = pivot.get(end_year)
+    pivot["cagr"] = pivot.apply(
+        lambda r: _cagr(r["base"], r["end"], span), axis=1,
+    )
+    out = pivot.reset_index().merge(meta, on="cbsa", how="left")
+    # Noise filter: drop metros with under 100 employed in end-year.
+    out = out[out["end"].fillna(0) >= 100]
+    out = out.dropna(subset=["cagr"])
+    out = out.sort_values("cagr", ascending=False).head(top_n).reset_index(drop=True)
+    return out[["cbsa", "cbsa_name", "base", "end", "cagr"]]
+
+
+# ── Projection queries (BLS Employment Projections, geo-level) ──────────────
+
+@st.cache_data(show_spinner=False)
+def run_employment_projection_state(soc_codes: tuple):
+    """Weighted-average projected CAGR by state across the given SOC codes.
+
+    Aggregates `employment_projections` rows where geo_level='state',
+    summing base_emp and proj_emp across the matched occupations, then
+    deriving an aggregate CAGR.
+
+    Returns DataFrame: stabbr, base_total, proj_total, cagr (decimal).
+    """
+    if not soc_codes:
+        return pd.DataFrame()
+    conn = get_conn()
+    soc_ph = ",".join("?" * len(soc_codes))
+    sql = f"""
+        SELECT geo_code, geo_name,
+               MAX(base_year) AS base_year, MAX(proj_year) AS proj_year,
+               SUM(base_emp)  AS base_total,
+               SUM(proj_emp)  AS proj_total
+        FROM employment_projections
+        WHERE geo_level = 'state'
+          AND occ_code IN ({soc_ph})
+        GROUP BY geo_code, geo_name
+    """
+    df = pd.read_sql_query(sql, conn, params=list(soc_codes))
+    conn.close()
+    if df.empty:
+        return df
+
+    df["stabbr"] = df["geo_code"].map(FIPS_TO_STABBR)
+    df = df.dropna(subset=["stabbr"])
+    df = df[~df["stabbr"].isin(EXCLUDED_TERRITORIES)]
+    df["span"] = (df["proj_year"] - df["base_year"]).clip(lower=1)
+    df["cagr"] = df.apply(
+        lambda r: _cagr(r["base_total"], r["proj_total"], r["span"]),
+        axis=1,
+    )
+    return (
+        df[["stabbr", "base_total", "proj_total", "cagr"]]
+        .sort_values("cagr", ascending=False, na_position="last")
+        .reset_index(drop=True)
+    )
+
+
+@st.cache_data(show_spinner=False)
+def run_employment_projection_metro(soc_codes: tuple, top_n: int = 25):
+    """Weighted-average projected CAGR by metro (CBSA)."""
+    if not soc_codes:
+        return pd.DataFrame()
+    conn = get_conn()
+    soc_ph = ",".join("?" * len(soc_codes))
+    sql = f"""
+        SELECT geo_code, MAX(geo_name) AS geo_name,
+               MAX(base_year) AS base_year, MAX(proj_year) AS proj_year,
+               SUM(base_emp)  AS base_total,
+               SUM(proj_emp)  AS proj_total
+        FROM employment_projections
+        WHERE geo_level = 'metro'
+          AND occ_code IN ({soc_ph})
+        GROUP BY geo_code
+    """
+    df = pd.read_sql_query(sql, conn, params=list(soc_codes))
+    conn.close()
+    if df.empty:
+        return df
+
+    df["span"] = (df["proj_year"] - df["base_year"]).clip(lower=1)
+    df["cagr"] = df.apply(
+        lambda r: _cagr(r["base_total"], r["proj_total"], r["span"]),
+        axis=1,
+    )
+    df = df.rename(columns={"geo_code": "cbsa", "geo_name": "cbsa_name"})
+    df = df.dropna(subset=["cagr"])
+    # Noise filter: require ≥100 base employed.
+    df = df[df["base_total"].fillna(0) >= 100]
+    return (
+        df.sort_values("cagr", ascending=False)
+          .head(top_n)
+          .reset_index(drop=True)[
+              ["cbsa", "cbsa_name", "base_total", "proj_total", "cagr"]
+          ]
+    )
+
+
+# ── Search Traffic state-level history (rolling 12-mo change) ───────────────
+
+@st.cache_data(show_spinner=False)
+def search_traffic_state_time_coverage(cip_patterns: tuple) -> int:
+    """How many (CIP, state) pairs have time-series data loaded?
+
+    Cheap pre-flight check used by the UI to decide whether the Growth
+    toggle has anything to render. Returns 0 if the table doesn't exist.
+    """
+    if not cip_patterns:
+        return 0
+    cip_patterns = expand_cip_patterns(cip_patterns)
+    conn = get_conn()
+    try:
+        conn.execute("SELECT 1 FROM google_trends_state_time LIMIT 1")
+    except Exception:
+        conn.close()
+        return 0
+    cip_clauses, params = [], []
+    for p in cip_patterns:
+        cip_clauses.append("cipcode LIKE ?" if "%" in p else "cipcode = ?")
+        params.append(p)
+    where = " OR ".join(cip_clauses) if cip_clauses else "1=1"
+    n = conn.execute(
+        f"SELECT COUNT(DISTINCT cipcode || '|' || state_abbr) "
+        f"FROM google_trends_state_time WHERE ({where})",
+        params,
+    ).fetchone()[0]
+    conn.close()
+    return int(n or 0)
+
+
+@st.cache_data(show_spinner=False)
+def run_search_traffic_state_growth(
+    cip_patterns: tuple, window_months: int = 12,
+):
+    """Rolling 12-month change in search interest per state.
+
+    Compares the average interest over the most recent `window_months`
+    versus the prior `window_months` for each state, summed across the
+    selected CIP codes. Returns DataFrame: stabbr, recent, prior, pct_change.
+    Negative when interest is declining. Returns empty DataFrame if no
+    state-level time-series data is loaded.
+    """
+    if not cip_patterns:
+        return pd.DataFrame()
+    cip_patterns = expand_cip_patterns(cip_patterns)
+    conn = get_conn()
+    try:
+        conn.execute("SELECT 1 FROM google_trends_state_time LIMIT 1")
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
+
+    cip_clauses, params = [], []
+    for p in cip_patterns:
+        cip_clauses.append("cipcode LIKE ?" if "%" in p else "cipcode = ?")
+        params.append(p)
+    cip_where = " OR ".join(cip_clauses) if cip_clauses else "1=1"
+
+    # Pull the full time series for the selected CIPs, then partition
+    # in pandas. This is cleaner than writing two SQL CTEs and the row
+    # count is small (≤ 51 states × ≤ 65 months × ≤ N CIPs).
+    sql = f"""
+        SELECT cipcode, state_abbr, date,
+               COALESCE(interest, 0) AS interest
+        FROM google_trends_state_time
+        WHERE ({cip_where})
+    """
+    raw = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+    if raw.empty:
+        return raw
+
+    raw["date"] = pd.to_datetime(raw["date"])
+    # Sum across the selected CIPs so multi-CIP selections aggregate
+    # cleanly; for a single CIP this is a no-op.
+    by_state_date = (
+        raw.groupby(["state_abbr", "date"], as_index=False)["interest"].sum()
+    )
+
+    # Determine the cutoff between "recent" and "prior" windows. Use
+    # the latest date observed across the dataset so partial-month
+    # bookends don't silently shift one state's window.
+    latest = by_state_date["date"].max()
+    cutoff_recent_start = latest - pd.DateOffset(months=window_months - 1)
+    cutoff_prior_start  = latest - pd.DateOffset(months=2 * window_months - 1)
+
+    by_state_date["bucket"] = "older"
+    by_state_date.loc[
+        by_state_date["date"] >= cutoff_recent_start, "bucket"
+    ] = "recent"
+    by_state_date.loc[
+        (by_state_date["date"] >= cutoff_prior_start)
+        & (by_state_date["date"] < cutoff_recent_start), "bucket"
+    ] = "prior"
+
+    pivot = (
+        by_state_date[by_state_date["bucket"].isin(["recent", "prior"])]
+        .groupby(["state_abbr", "bucket"], as_index=False)["interest"]
+        .mean()
+        .pivot(index="state_abbr", columns="bucket", values="interest")
+        .reset_index()
+    )
+    if "recent" not in pivot.columns or "prior" not in pivot.columns:
+        return pd.DataFrame()
+
+    pivot["pct_change"] = pivot.apply(
+        lambda r: (r["recent"] - r["prior"]) / r["prior"]
+        if pd.notna(r["prior"]) and r["prior"] > 0 else float("nan"),
+        axis=1,
+    )
+    pivot = pivot.rename(columns={"state_abbr": "stabbr"})
+    pivot = pivot[~pivot["stabbr"].isin(EXCLUDED_TERRITORIES)]
+    return (
+        pivot.dropna(subset=["pct_change"])
+             .sort_values("pct_change", ascending=False)
+             .reset_index(drop=True)
+        [["stabbr", "prior", "recent", "pct_change"]]
+    )
+
+
+@st.cache_data(show_spinner=False)
+def run_dep_by_state_query(
+    cip_patterns: tuple,
+    awlevels: tuple,
+    year: int,
+):
+    """DE share by state for a single year.
+
+    Returns DataFrame: stabbr, programs, programs_de_any, pct_de_any.
+    """
+    cip_patterns = expand_cip_patterns(cip_patterns)
+    conn = get_conn()
+    try:
+        conn.execute("SELECT 1 FROM completions_dep LIMIT 1")
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
+
+    params = [year]
+    where = [
+        "d.year = ?",
+        "d.programs > 0",
+        "LENGTH(d.cipcode) >= 5",
+    ]
+
+    if cip_patterns:
+        cip_clauses = []
+        for p in cip_patterns:
+            cip_clauses.append("d.cipcode LIKE ?" if "%" in p else "d.cipcode = ?")
+            params.append(p)
+        where.append(f"({' OR '.join(cip_clauses)})")
+
+    if awlevels:
+        placeholders = ",".join("?" * len(awlevels))
+        where.append(f"d.awlevel IN ({placeholders})")
+        params.extend(awlevels)
+
+    excluded = ",".join(f"'{s}'" for s in EXCLUDED_TERRITORIES)
+    where.append(f"i.stabbr NOT IN ({excluded})")
+    where.append("i.stabbr IS NOT NULL AND i.stabbr != ''")
+
+    sql = f"""
+        SELECT
+            i.stabbr             AS stabbr,
+            SUM(d.programs)      AS programs,
+            SUM(d.programs_de_any) AS programs_de_any
+        FROM completions_dep d
+        INNER JOIN institutions i
+          ON d.unitid = i.unitid AND d.year = i.year
+        WHERE {' AND '.join(where)}
+        GROUP BY i.stabbr
+    """
+    df = pd.read_sql_query(sql, conn, params=params)
+    conn.close()
+
+    if df.empty:
+        return df
+    df["pct_de_any"] = (
+        100.0 * df["programs_de_any"] / df["programs"]
+    ).round(1).where(df["programs"] > 0)
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def run_employment_by_state_query(soc_codes: tuple, year: int):
+    """Total employment by state for the given SOC codes in a single year.
+
+    Returns DataFrame: stabbr, tot_emp.
+    Uses OES state-level rows (area_type=2). Aggregates across multiple
+    occupations; states with suppressed values for a particular SOC simply
+    don't contribute.
+    """
+    if not soc_codes:
+        return pd.DataFrame()
+    conn = get_conn()
+    soc_ph = ",".join("?" * len(soc_codes))
+    sql = f"""
+        SELECT area_code, SUM(tot_emp) AS tot_emp
+        FROM oes_employment
+        WHERE year = ?
+          AND area_type = 2
+          AND occ_code IN ({soc_ph})
+          AND tot_emp IS NOT NULL
+        GROUP BY area_code
+    """
+    df = pd.read_sql_query(sql, conn, params=[year] + list(soc_codes))
+    conn.close()
+    if df.empty:
+        return df
+    df["stabbr"] = df["area_code"].map(FIPS_TO_STABBR)
+    df = df.dropna(subset=["stabbr"])
+    df = df[~df["stabbr"].isin(EXCLUDED_TERRITORIES)]
+    return df[["stabbr", "tot_emp"]].reset_index(drop=True)
+
+
 _CORESIGNAL_BASE = "https://api.coresignal.com/cdapi/v2/job_base"
 
 # Generic SOC titles to exclude from Coresignal searches (too broad / noisy)
@@ -963,7 +1926,7 @@ def _resolve_coresignal_titles(cip_patterns: tuple, awlevels: tuple) -> list:
 
     awlevel_filter = ""
     if awlevels:
-        undergrad = any(a in (1, 2, 3, 4, 5) for a in awlevels)
+        undergrad = any(a in (1, 2, 3, 4, 5, 20, 21) for a in awlevels)
         grad = any(a in (6, 7, 8, 17, 18, 19) for a in awlevels)
         if undergrad and not grad:
             awlevel_filter = "AND awlevel_group = 'undergrad'"
@@ -1117,8 +2080,8 @@ def run_employment_query(
     conn = get_conn()
 
     # Determine award-level group filter
-    # undergrad: awlevel 1-5; graduate: awlevel 6+
-    UNDERGRAD_LEVELS = {1, 2, 3, 4, 5}
+    # undergrad: awlevel 1-5, 20, 21; graduate: awlevel 6+
+    UNDERGRAD_LEVELS = {1, 2, 3, 4, 5, 20, 21}
     GRADUATE_LEVELS = {6, 7, 8, 17, 18, 19}
     has_undergrad = bool(set(awlevels) & UNDERGRAD_LEVELS)
     has_graduate = bool(set(awlevels) & GRADUATE_LEVELS)
@@ -1507,6 +2470,42 @@ def get_employment_projections(
     return df
 
 
+@st.cache_data(show_spinner=False)
+def resolve_soc_codes_for_cips(cip_patterns: tuple, awlevels: tuple) -> tuple:
+    """SOC 2018 codes that map to the given CIPs in `cip_soc_crosswalk`.
+
+    Honors the awlevel_group filter (undergrad-only excludes graduate-only
+    mappings, etc.) the same way `run_employment_query` does. Returns a
+    tuple suitable for caching keys.
+    """
+    if not cip_patterns:
+        return tuple()
+    UNDERGRAD = {1, 2, 3, 4, 5, 20, 21}
+    GRADUATE = {6, 7, 8, 17, 18, 19}
+    has_ug = bool(set(awlevels) & UNDERGRAD)
+    has_gr = bool(set(awlevels) & GRADUATE)
+    if has_ug and has_gr:
+        awf = ""
+    elif has_gr:
+        awf = " AND awlevel_group IN ('all', 'graduate')"
+    else:
+        awf = " AND awlevel_group = 'all'"
+
+    conn = get_conn()
+    cip_clauses, cip_params = [], []
+    for p in cip_patterns:
+        cip_clauses.append("cipcode LIKE ?" if "%" in p else "cipcode = ?")
+        cip_params.append(p)
+    cip_where = " OR ".join(cip_clauses)
+    rows = conn.execute(
+        f"SELECT DISTINCT soc_code FROM cip_soc_crosswalk "
+        f"WHERE ({cip_where}){awf}",
+        cip_params,
+    ).fetchall()
+    conn.close()
+    return tuple(r[0] for r in rows)
+
+
 @st.cache_data(show_spinner=False, ttl=600)
 def get_emp_proj_cagr(
     cip_patterns: tuple,
@@ -1522,7 +2521,7 @@ def get_emp_proj_cagr(
     conn = get_conn()
 
     # Award-level group filter (mirrors run_employment_query)
-    UNDERGRAD = {1, 2, 3, 4, 5}
+    UNDERGRAD = {1, 2, 3, 4, 5, 20, 21}
     GRADUATE = {6, 7, 8, 17, 18, 19}
     has_ug = bool(set(awlevels) & UNDERGRAD)
     has_gr = bool(set(awlevels) & GRADUATE)
@@ -1991,38 +2990,475 @@ def build_export_workbook(sheets_data):
     return buf.getvalue()
 
 
+# ── CSV (zip) export ──────────────────────────────────────────────────────────
+def build_csv_zip(sheets_data) -> bytes:
+    """Bundle each section into a single CSV and zip them together.
+
+    sheets_data: list of (name, df, fmt_opts) tuples (fmt_opts unused here).
+    """
+    import zipfile
+
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, df, _ in sheets_data:
+            if df is None or getattr(df, "empty", True):
+                continue
+            safe = (
+                name.lower()
+                .replace(" / ", "_")
+                .replace(" ", "_")
+                .replace("/", "_")
+            )
+            zf.writestr(f"{safe}.csv", df.to_csv(index=False))
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ── PDF report ────────────────────────────────────────────────────────────────
+def build_pdf_report(sheets_data, *, report_meta: dict) -> bytes:
+    """Build a stylized, VI-branded PDF report.
+
+    sheets_data: list of (name, df, fmt_opts) tuples.
+    report_meta: dict with keys 'title', 'subtitle' (optional),
+                 'geo_label', 'cip_display', 'level_str'.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import LETTER, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        BaseDocTemplate, Frame, PageBreak, PageTemplate, Paragraph, Spacer,
+        Table, TableStyle,
+    )
+
+    VI_ORANGE = colors.HexColor("#f26822")
+    VI_BLUE = colors.HexColor("#0f86c1")
+    INK = colors.HexColor("#1F2937")
+    MUTED = colors.HexColor("#6B7280")
+    HAIRLINE = colors.HexColor("#E5E7EB")
+    SOFT_BG = colors.HexColor("#F9FAFB")
+    SOFT_ACCENT = colors.HexColor("#FFF5EE")
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "vi_title", parent=styles["Title"],
+        fontName="Helvetica-Bold", fontSize=22, leading=28,
+        textColor=INK, spaceAfter=4,
+    )
+    subtitle_style = ParagraphStyle(
+        "vi_subtitle", parent=styles["Normal"],
+        fontName="Helvetica", fontSize=11, leading=15,
+        textColor=MUTED, spaceAfter=18,
+    )
+    section_style = ParagraphStyle(
+        "vi_section", parent=styles["Heading2"],
+        fontName="Helvetica-Bold", fontSize=14, leading=18,
+        textColor=VI_ORANGE, spaceBefore=14, spaceAfter=8,
+    )
+    body_style = ParagraphStyle(
+        "vi_body", parent=styles["Normal"],
+        fontName="Helvetica", fontSize=9, leading=12,
+        textColor=INK,
+    )
+    meta_label_style = ParagraphStyle(
+        "vi_meta_label", parent=styles["Normal"],
+        fontName="Helvetica-Bold", fontSize=8, leading=11,
+        textColor=MUTED,
+    )
+    meta_value_style = ParagraphStyle(
+        "vi_meta_value", parent=styles["Normal"],
+        fontName="Helvetica", fontSize=10, leading=13,
+        textColor=INK, spaceAfter=4,
+    )
+    footer_style = ParagraphStyle(
+        "vi_footer", parent=styles["Normal"],
+        fontName="Helvetica", fontSize=7, leading=10,
+        textColor=MUTED, alignment=1,
+    )
+
+    def _fmt(value, col_name, fmt_opts):
+        if value is None:
+            return "—"
+        try:
+            if pd.isna(value):
+                return "—"
+        except (TypeError, ValueError):
+            pass
+        money_cols = set(fmt_opts.get("money_cols") or [])
+        pct_cols = set(fmt_opts.get("pct_cols") or [])
+        num_cols = set(fmt_opts.get("num_cols") or [])
+        if col_name in money_cols and isinstance(value, (int, float, np.integer, np.floating)):
+            return f"${value:,.0f}"
+        if col_name in pct_cols and isinstance(value, (int, float, np.integer, np.floating)):
+            v = value if abs(value) > 1 else value * 100
+            return f"{v:+.1f}%"
+        if col_name in num_cols and isinstance(value, (int, float, np.integer, np.floating)):
+            return f"{value:,.0f}"
+        if isinstance(value, (np.integer,)):
+            return f"{int(value):,}"
+        if isinstance(value, (np.floating, float)):
+            return f"{float(value):,.2f}"
+        return str(value)
+
+    page_w, page_h = landscape(LETTER)
+    margin_l = margin_r = 0.5 * inch
+    margin_t = 1.0 * inch
+    margin_b = 0.7 * inch
+    frame = Frame(
+        margin_l, margin_b,
+        page_w - margin_l - margin_r,
+        page_h - margin_t - margin_b,
+        id="content",
+    )
+
+    def _draw_header_footer(canvas, doc):
+        canvas.saveState()
+        # Top brand bar
+        canvas.setFillColor(VI_ORANGE)
+        canvas.rect(0, page_h - 0.4 * inch, page_w, 0.4 * inch, fill=1, stroke=0)
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 11)
+        canvas.drawString(margin_l, page_h - 0.27 * inch, "VALIDATED INSIGHTS")
+        canvas.setFont("Helvetica", 9)
+        canvas.drawRightString(
+            page_w - margin_r, page_h - 0.27 * inch,
+            "IPEDS Completions Explorer",
+        )
+        # Footer
+        canvas.setFillColor(MUTED)
+        canvas.setFont("Helvetica", 7.5)
+        canvas.drawString(
+            margin_l, 0.4 * inch,
+            f"Generated {pd.Timestamp.now().strftime('%B %d, %Y')}",
+        )
+        canvas.drawRightString(
+            page_w - margin_r, 0.4 * inch,
+            f"Page {doc.page}",
+        )
+        canvas.setStrokeColor(HAIRLINE)
+        canvas.setLineWidth(0.5)
+        canvas.line(margin_l, 0.55 * inch, page_w - margin_r, 0.55 * inch)
+        canvas.restoreState()
+
+    buf = BytesIO()
+    doc = BaseDocTemplate(
+        buf,
+        pagesize=landscape(LETTER),
+        leftMargin=margin_l, rightMargin=margin_r,
+        topMargin=margin_t, bottomMargin=margin_b,
+        title=report_meta.get("title", "IPEDS Report"),
+        author="Validated Insights",
+    )
+    doc.addPageTemplates([
+        PageTemplate(id="main", frames=[frame], onPage=_draw_header_footer),
+    ])
+
+    story = []
+
+    # ── Cover/header block ──
+    story.append(Paragraph(report_meta.get("title", "IPEDS Report"), title_style))
+    if report_meta.get("subtitle"):
+        story.append(Paragraph(report_meta["subtitle"], subtitle_style))
+
+    # Filter summary card
+    meta_rows = [
+        [Paragraph("GEOGRAPHY", meta_label_style), Paragraph("PROGRAM", meta_label_style), Paragraph("AWARD LEVEL", meta_label_style)],
+        [
+            Paragraph(report_meta.get("geo_label", "—"), meta_value_style),
+            Paragraph(report_meta.get("cip_display", "—"), meta_value_style),
+            Paragraph(report_meta.get("level_str", "—"), meta_value_style),
+        ],
+    ]
+    avail_w = page_w - margin_l - margin_r
+    meta_tbl = Table(meta_rows, colWidths=[avail_w / 3.0] * 3)
+    meta_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), SOFT_ACCENT),
+        ("BOX", (0, 0), (-1, -1), 0.6, HAIRLINE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LINEBEFORE", (1, 0), (1, -1), 0.5, HAIRLINE),
+        ("LINEBEFORE", (2, 0), (2, -1), 0.5, HAIRLINE),
+    ]))
+    story.append(meta_tbl)
+    story.append(Spacer(1, 12))
+
+    # ── Per-section content ──
+    for idx, (name, df, fmt_opts) in enumerate(sheets_data):
+        if df is None or getattr(df, "empty", True):
+            continue
+        if idx > 0:
+            story.append(PageBreak())
+        story.append(Paragraph(name, section_style))
+
+        # Cap rows per section to keep PDF size sane
+        ROW_CAP = 60
+        truncated = len(df) > ROW_CAP
+        view = df.head(ROW_CAP).copy()
+
+        # Build header + body
+        cols = list(view.columns)
+        header = [Paragraph(f"<b>{c}</b>", body_style) for c in cols]
+        body = []
+        for _, row in view.iterrows():
+            body.append([
+                Paragraph(_fmt(row[c], c, fmt_opts), body_style)
+                for c in cols
+            ])
+
+        n_cols = len(cols)
+        col_widths = [avail_w / n_cols] * n_cols
+        # Give the leading text column more weight if it looks like a label column
+        if cols and cols[0] in ("Institution", "Occupation", "City", "Field", "State"):
+            extra = avail_w * 0.18
+            col_widths = [avail_w * 0.30] + [(avail_w - avail_w * 0.30) / max(1, n_cols - 1)] * (n_cols - 1) if n_cols > 1 else col_widths
+
+        tbl = Table([header] + body, colWidths=col_widths, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), VI_ORANGE),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 9),
+            ("ALIGN", (0, 0), (-1, 0), "LEFT"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, SOFT_BG]),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.6, VI_ORANGE),
+            ("GRID", (0, 1), (-1, -1), 0.25, HAIRLINE),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 1), (-1, -1), 8.5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(tbl)
+        if truncated:
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(
+                f"<i>Showing first {ROW_CAP:,} of {len(df):,} rows. "
+                f"Export as Excel or CSV for the full dataset.</i>",
+                ParagraphStyle("trunc", parent=body_style, textColor=MUTED, fontSize=8),
+            ))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 def main():
     # One-time DB prep
     ensure_cbsa_index()
+    ensure_award_levels()
 
     # ── Global styles ─────────────────────────────────────────────────────────
-    st.markdown(
+    # Use st.html (not st.markdown) so the <style> block isn't subject to
+    # Streamlit's markdown HTML sanitizer — which in recent versions strips
+    # <link> tags and can leak trailing <style> contents as visible text.
+    # @import inside <style> handles webfont loading without a separate
+    # <link> element.
+    st.html(
         """
-        <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
         <style>
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
+        :root {
+            --vi-orange: #f26822;
+            --vi-orange-soft: #FFF5EE;
+            --vi-orange-deep: #D44E0F;
+            --vi-blue: #0f86c1;
+            --vi-ink: #1F2937;
+            --vi-muted: #6B7280;
+            --vi-hairline: #E5E7EB;
+            --vi-soft-bg: #F9FAFB;
+        }
         html, body, [class*="css"], .stApp, .stMarkdown, .stTextInput,
         .stSelectbox, .stMultiSelect, .stRadio, .stCheckbox, .stMetric,
         .stSidebar, .stButton, .stCaption, .stExpander, .stDataFrame,
         button, input, select, textarea {
             font-family: 'Montserrat', Arial, sans-serif !important;
         }
-        h1, h2, h3, h4, h5, h6,
-        .stTitle, [data-testid="stMetricValue"],
+        .stApp { background-color: #FAFBFC; }
+
+        /* Headings & title */
+        h1, .stTitle {
+            font-family: 'Montserrat', Arial, sans-serif !important;
+            color: var(--vi-ink) !important;
+            font-weight: 800 !important;
+            letter-spacing: -0.015em;
+            line-height: 1.15 !important;
+        }
+        h2, h3, h4, h5, h6,
         .stSidebar h1, .stSidebar h2, .stSidebar h3 {
             font-family: 'Montserrat', Arial, sans-serif !important;
-            color: #f26822 !important;
+            color: var(--vi-ink) !important;
+            font-weight: 700 !important;
+            letter-spacing: -0.005em;
+        }
+
+        /* Section subheaders in MAIN content get a left orange accent.
+           Excludes the sidebar so step-numbered controls stay clean. */
+        section.main [data-testid="stHeading"] h3,
+        [data-testid="stMain"] [data-testid="stHeading"] h3 {
+            position: relative;
+            padding-left: 14px;
+            margin-top: 8px;
+        }
+        section.main [data-testid="stHeading"] h3::before,
+        [data-testid="stMain"] [data-testid="stHeading"] h3::before {
+            content: "";
+            position: absolute; left: 0; top: 6px; bottom: 6px;
+            width: 4px; border-radius: 2px;
+            background: var(--vi-orange);
+        }
+
+        /* Metric cards */
+        [data-testid="stMetric"] {
+            background: white;
+            border: 1px solid var(--vi-hairline);
+            border-radius: 10px;
+            padding: 14px 16px 12px 16px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+            transition: box-shadow 120ms ease, transform 120ms ease;
+        }
+        [data-testid="stMetric"]:hover {
+            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
         }
         [data-testid="stMetricLabel"] {
             font-family: 'Montserrat', Arial, sans-serif !important;
-            color: #666666 !important;
+            color: var(--vi-muted) !important;
+            font-weight: 600 !important;
+            font-size: 0.72rem !important;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        [data-testid="stMetricValue"] {
+            font-family: 'Montserrat', Arial, sans-serif !important;
+            color: var(--vi-ink) !important;
+            font-weight: 700 !important;
+            font-size: 1.7rem !important;
+            line-height: 1.1 !important;
         }
         [data-testid="stMetricDelta"] {
             font-family: 'Montserrat', Arial, sans-serif !important;
+            font-weight: 600 !important;
+            font-size: 0.78rem !important;
         }
+
+        /* Sidebar */
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #FFFFFF 0%, #FAFBFC 100%);
+            border-right: 1px solid var(--vi-hairline);
+        }
+        section[data-testid="stSidebar"] hr { border-color: var(--vi-hairline); }
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3 {
+            color: var(--vi-ink) !important;
+            font-weight: 700 !important;
+        }
+
+        /* Buttons */
+        .stButton > button {
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            transition: all 120ms ease;
+        }
+        .stButton > button[kind="primary"] {
+            background: var(--vi-orange) !important;
+            border-color: var(--vi-orange) !important;
+            color: white !important;
+            box-shadow: 0 1px 2px rgba(242, 104, 34, 0.25);
+        }
+        .stButton > button[kind="primary"]:hover {
+            background: var(--vi-orange-deep) !important;
+            border-color: var(--vi-orange-deep) !important;
+            box-shadow: 0 3px 10px rgba(242, 104, 34, 0.30);
+            transform: translateY(-1px);
+        }
+        .stDownloadButton > button {
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            border: 1px solid var(--vi-orange) !important;
+            color: var(--vi-orange) !important;
+            background: white !important;
+        }
+        .stDownloadButton > button:hover {
+            background: var(--vi-orange-soft) !important;
+        }
+
+        /* Top-level Export button — ghost-orange.
+           Uses :has() to target only the column that contains our
+           vi-export-trigger-anchor marker (placed via st.html before
+           the button), so other secondary buttons keep their default style. */
+        div[data-testid="stColumn"]:has(.vi-export-trigger-anchor)
+            [data-testid="stButton"] > button {
+            background: rgba(242, 104, 34, 0.08) !important;
+            border: 1.5px solid var(--vi-orange) !important;
+            color: var(--vi-orange) !important;
+            font-weight: 600 !important;
+            box-shadow: none !important;
+        }
+        div[data-testid="stColumn"]:has(.vi-export-trigger-anchor)
+            [data-testid="stButton"] > button:hover {
+            background: rgba(242, 104, 34, 0.16) !important;
+            border-color: var(--vi-orange-deep) !important;
+            color: var(--vi-orange-deep) !important;
+            transform: translateY(-1px);
+        }
+        /* Force the Material icon glyph to inherit the orange color
+           (Streamlit hard-codes a default color on icon spans). */
+        div[data-testid="stColumn"]:has(.vi-export-trigger-anchor)
+            [data-testid="stButton"] [data-testid="stIconMaterial"],
+        div[data-testid="stColumn"]:has(.vi-export-trigger-anchor)
+            [data-testid="stButton"] [data-testid="stIconMaterial"] * {
+            color: var(--vi-orange) !important;
+            fill: var(--vi-orange) !important;
+        }
+        /* Hide the empty marker span (visual only) */
+        .vi-export-trigger-anchor { display: none; }
+
+        /* Top export bar */
+        .vi-export-bar {
+            background: white;
+            border: 1px solid var(--vi-hairline);
+            border-radius: 12px;
+            padding: 14px 16px;
+            margin: 4px 0 22px 0;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        .vi-export-bar [data-baseweb="select"] {
+            border-radius: 8px !important;
+        }
+
+        /* Map caption above choropleth */
+        .vi-map-caption {
+            color: var(--vi-muted);
+            font-size: 0.78rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin: 18px 0 -4px 0;
+        }
+
+        /* Dividers — softer */
+        hr { border-color: var(--vi-hairline) !important; opacity: 0.7; }
+
+        /* Dataframes — cleaner header */
+        [data-testid="stDataFrame"] {
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid var(--vi-hairline);
+        }
+
+        /* Caption text */
+        .stCaption, [data-testid="stCaptionContainer"] {
+            color: var(--vi-muted) !important;
+        }
+
+        /* Tighten title spacing */
+        .block-container { padding-top: 2.2rem !important; }
         </style>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
@@ -2036,9 +3472,17 @@ def main():
         },
     }
 
+    _windows = get_data_windows()
     with st.sidebar:
         st.markdown("## 🎓 IPEDS Explorer")
-        st.caption("Completions 2014–15 → 2023–24")
+        if _windows.get("completions"):
+            _yr_min, _yr_max = _windows["completions"]
+            st.caption(
+                f"Completions data: AY {_ay_label(_yr_min)} → AY {_ay_label(_yr_max)} "
+                f"({_yr_max - _yr_min + 1} years)"
+            )
+        else:
+            st.caption("Completions data window unavailable")
 
         # DB version diagnostic (small caption at top of sidebar)
         try:
@@ -2155,8 +3599,11 @@ def main():
         all_levels = st.checkbox("All award levels", value=False, key="all_levels")
 
         # Build option list: individual levels + aggregate groups
+        # Note: awlevels 20 and 21 replaced awlevel 1 starting in IPEDS C2021
+        # (2020-21 collection). "Undergraduate Certificate" bundles all three
+        # so the chart stays continuous across the taxonomy change.
         AGGREGATE_LEVELS = {
-            "Undergraduate Certificate": (1, 2, 4),
+            "Undergraduate Certificate": (1, 2, 4, 20, 21),
             "Graduate Certificate": (6, 8),
             "Doctoral Degree": (17, 18, 19),
         }
@@ -2190,9 +3637,18 @@ def main():
 
     # ── Main area ─────────────────────────────────────────────────────────────
     st.title("IPEDS Completions Trend Explorer")
+    if _windows.get("completions"):
+        _w_min, _w_max = _windows["completions"]
+        _comp_window_str = f"AY {_ay_label(_w_min)} – AY {_ay_label(_w_max)}"
+    else:
+        _comp_window_str = "available academic years"
     st.caption(
-        "Total degrees and certificates awarded by IPEDS-reporting institutions "
-        "| Source: NCES IPEDS Completions Survey"
+        "Total degrees and certificates awarded by Title-IV-eligible, "
+        "IPEDS-reporting U.S. postsecondary institutions, "
+        "counted by 6-digit CIP code and award level. "
+        f"Coverage: {_comp_window_str}. "
+        "| Source: NCES IPEDS Completions Survey (file C{year}_A, "
+        "first-major awards only)."
     )
 
     # Determine geo_key for query — "All states" is functionally national
@@ -2278,11 +3734,14 @@ def main():
     else:
         level_str = f"{len(selected_level_labels)} award levels"
 
+    # IPEDS file C{YYYY}_A reports awards conferred July YYYY-1 through
+    # June YYYY (AY (YYYY-1)-YYYY), and the loader stores YYYY in `year`.
+    # So DB year=Y means AY (Y-1)-Y.
     def yr_label(y):
-        return f"{y}–{str(y + 1)[-2:]}"
+        return f"{y - 1}–{str(y)[-2:]}"
 
     def yr_label_short(y):
-        return f"'{str(y)[-2:]}–'{str(y + 1)[-2:]}"
+        return f"'{str(y - 1)[-2:]}–'{str(y)[-2:]}"
 
     all_years = sorted(df["year"].unique())
     year_tick_labels = [yr_label(y) for y in all_years]
@@ -2310,9 +3769,14 @@ def main():
     # Extract capacity CAGR for the projected program count bars
     capacity_cagr = proj_components.get("capacity")
 
-    # ── Export All to Excel button ────────────────────────────────────────────
-    def _build_excel_export():
-        """Collect data from all sections and build a multi-tab Excel file."""
+    # ── Unified export (Excel / CSV / PDF) ────────────────────────────────────
+    def _collect_export_sheets():
+        """Assemble (name, df, fmt_opts) tuples for every section that has data.
+
+        Returns a list. Each format (Excel / CSV-zip / PDF) consumes the same
+        list, optionally filtered by user-selected section names. The Summary
+        sheet is always inserted first.
+        """
         sheets = []
 
         # 1. Completions Trend
@@ -2364,8 +3828,8 @@ def main():
                 return None
 
             if col_3ago in yr_cols:
-                pivot["3-yr CAGR"] = pivot.apply(lambda r: _inst_cagr(r, col_3ago, 3), axis=1)
-            pivot["10-yr CAGR"] = pivot.apply(lambda r: _inst_cagr(r, first_col, n_years), axis=1)
+                pivot["Post-COVID CAGR"] = pivot.apply(lambda r: _inst_cagr(r, col_3ago, 3), axis=1)
+            pivot["Past Decade CAGR"] = pivot.apply(lambda r: _inst_cagr(r, first_col, n_years), axis=1)
             pivot = pivot.rename(columns={y: yr_label(y) for y in yr_cols})
             control_map = {"Public": "Public", "Private nonprofit": "Private", "Private for-profit": "For-Profit"}
             pivot["control_name"] = pivot["control_name"].map(control_map).fillna(pivot["control_name"])
@@ -2373,7 +3837,7 @@ def main():
             pivot = pivot.drop(columns=["unitid", "stabbr"])
             pivot = pivot.rename(columns={"instnm": "Institution", "city": "City", "control_name": "Control"})
             yr_labels = [yr_label(y) for y in yr_cols]
-            cagr_cols = [c for c in ["3-yr CAGR", "10-yr CAGR"] if c in pivot.columns]
+            cagr_cols = [c for c in ["Post-COVID CAGR", "Past Decade CAGR"] if c in pivot.columns]
             pivot = pivot[["Institution", "City", "Control"] + yr_labels + cagr_cols]
             last_yr_lbl = yr_label(last_col)
             pivot = pivot.sort_values(last_yr_lbl, ascending=False, na_position="last").reset_index(drop=True)
@@ -2491,34 +3955,139 @@ def main():
         summary_df = pd.DataFrame(summary_rows)
         sheets.insert(0, ("Summary", summary_df, {}))
 
-        return build_export_workbook(sheets)
+        return sheets
 
     cip_slug = "all_programs" if all_cips else (
         "_".join(cip_label_to_code[l] for l in selected_cip_labels) or "completions"
     )
-    excel_fname = (
-        f"ipeds_{cip_slug}"
-        f"_{geo_label.replace(', ', '_').replace(' ', '_')}.xlsx"
-    )
+    geo_slug = geo_label.replace(", ", "_").replace(" ", "_")
+    base_fname = f"ipeds_{cip_slug}_{geo_slug}"
 
-    # Place the button in the top-right area
-    _btn_col1, _btn_col2 = st.columns([5, 1])
-    with _btn_col2:
-        if st.button("📊 Export All to Excel", type="primary", use_container_width=True):
-            with st.spinner("Building Excel export…"):
-                excel_bytes = _build_excel_export()
-            st.session_state["_excel_export"] = excel_bytes
-            st.session_state["_excel_fname"] = excel_fname
+    # Candidate section list — stable, doesn't require running the queries.
+    # Some sections only fill in for specific filter combinations (e.g. DEP
+    # and Scorecard need a CIP selected); we surface them in the picker
+    # regardless and the underlying collector silently drops empty ones.
+    selectable_sections = [
+        "Completions Trend",
+        "By Institution",
+        "Distance Education",
+        "Graduate Outcomes",
+        "Employment",
+    ]
 
-    if "_excel_export" in st.session_state:
-        with _btn_col2:
-            st.download_button(
-                "⬇️ Download Excel",
-                data=st.session_state["_excel_export"],
-                file_name=st.session_state["_excel_fname"],
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_excel_all",
+    # Reset stored exports if the underlying filters changed
+    _filters_signature = (cip_slug, geo_slug, tuple(selected_awlevels))
+    if st.session_state.get("_export_filters_sig") != _filters_signature:
+        for k in (
+            "_export_payload", "_export_fname", "_export_mime",
+            "_export_filters_sig", "_export_format_label",
+        ):
+            st.session_state.pop(k, None)
+        st.session_state["_export_filters_sig"] = _filters_signature
+
+    # ── Export modal ──────────────────────────────────────────────────────────
+    @st.dialog("Export report", width="large")
+    def _export_dialog():
+        st.caption(
+            f"Building from current filters · "
+            f"{cip_display} · {level_str} · {geo_label}"
+        )
+        chosen_sections = st.multiselect(
+            "Sections to include",
+            options=selectable_sections,
+            default=[],
+            placeholder="All sections (default)",
+            key="export_sections",
+            help="Leave empty to include every section, or pick specific ones.",
+        )
+        export_format = st.selectbox(
+            "Format",
+            options=["PDF report", "Excel (.xlsx)", "CSV (.zip)"],
+            key="export_format",
+            help=(
+                "PDF: stylized branded report. Excel: multi-tab workbook. "
+                "CSV: zip archive with one CSV per section."
+            ),
+        )
+
+        st.markdown(
+            "<div style='height:6px'></div>", unsafe_allow_html=True,
+        )
+        _bcol1, _bcol2 = st.columns([1, 1])
+        with _bcol1:
+            _go = st.button(
+                "Generate", type="primary", use_container_width=True,
+                key="export_generate",
             )
+        with _bcol2:
+            if "_export_payload" in st.session_state:
+                st.download_button(
+                    f"⬇  Download {st.session_state.get('_export_format_label', '')}",
+                    data=st.session_state["_export_payload"],
+                    file_name=st.session_state["_export_fname"],
+                    mime=st.session_state["_export_mime"],
+                    use_container_width=True,
+                    key="export_download",
+                )
+            else:
+                st.markdown(
+                    "<div style='color:#9CA3AF; font-size:0.82rem; "
+                    "padding-top:10px; text-align:center;'>"
+                    "Click <b>Generate</b> to build</div>",
+                    unsafe_allow_html=True,
+                )
+
+        if _go:
+            keep = set(chosen_sections) if chosen_sections else set(selectable_sections)
+            with st.spinner("Collecting section data…"):
+                all_sheets = _collect_export_sheets()
+            filtered = [s for s in all_sheets if s[0] == "Summary" or s[0] in keep]
+
+            with st.spinner(f"Building {export_format}…"):
+                if export_format == "Excel (.xlsx)":
+                    payload = build_export_workbook(filtered)
+                    fname = f"{base_fname}.xlsx"
+                    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    fmt_label = "Excel"
+                elif export_format == "CSV (.zip)":
+                    payload = build_csv_zip(filtered)
+                    fname = f"{base_fname}.zip"
+                    mime = "application/zip"
+                    fmt_label = "CSV"
+                else:  # PDF report
+                    payload = build_pdf_report(
+                        [s for s in filtered if s[0] != "Summary"],
+                        report_meta={
+                            "title": "IPEDS Completions Report",
+                            "subtitle": f"{cip_display} · {level_str}",
+                            "geo_label": geo_label,
+                            "cip_display": cip_display,
+                            "level_str": level_str,
+                        },
+                    )
+                    fname = f"{base_fname}.pdf"
+                    mime = "application/pdf"
+                    fmt_label = "PDF"
+
+            st.session_state["_export_payload"] = payload
+            st.session_state["_export_fname"] = fname
+            st.session_state["_export_mime"] = mime
+            st.session_state["_export_format_label"] = fmt_label
+            st.rerun()
+
+    # Single trigger button — pinned to the right.
+    # Styled in the global stylesheet via the .vi-export-trigger marker class
+    # (see the .vi-export-trigger rule near the bottom of the global <style>).
+    _trig_l, _trig_r = st.columns([5, 1])
+    with _trig_r:
+        st.html('<span class="vi-export-trigger-anchor"></span>')
+        if st.button(
+            "Export",
+            icon=":material/file_download:",
+            use_container_width=True,
+            key="export_open",
+        ):
+            _export_dialog()
 
     # ── Summary metrics ───────────────────────────────────────────────────────
     agg = df_totals
@@ -2554,11 +4123,11 @@ def main():
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric(f"{yr_label(last_yr)} Completions", f"{last_val:,}")
     m2.metric(
-        f"10-yr CAGR ({yr_label(first_yr)} → {yr_label(last_yr)})",
+        f"Past Decade CAGR ({yr_label(first_yr)} → {yr_label(last_yr)})",
         f"{cagr_10:+.1%}" if cagr_10 is not None else "N/A",
     )
     m3.metric(
-        f"3-yr CAGR ({yr_label(yr_3ago)} → {yr_label(last_yr)})",
+        f"Post-COVID CAGR ({yr_label(yr_3ago)} → {yr_label(last_yr)})",
         f"{cagr_3:+.1%}" if cagr_3 is not None else "N/A",
     )
     m4.metric(
@@ -2861,39 +4430,159 @@ def main():
     )
     st.plotly_chart(fig_yoy, use_container_width=True)
 
-    # ── Download CSV (completions + YoY) ──────────────────────────────────────
-    if "award_level_name" in df.columns:
-        download_df = df[["year", "award_level_name", "completions"]].copy()
-        download_df["year"] = download_df["year"].apply(yr_label)
-        download_df.columns = ["Year", "Award Level", "Completions"]
-    else:
-        download_df = df.groupby("year")["completions"].sum().reset_index()
-        download_df["year"] = download_df["year"].apply(yr_label)
-        download_df.columns = ["Year", "Completions"]
+    # ── Completions geographic distribution (map + ranking) ──────────────────
+    if not all_cips:
+        _latest_year = int(max(df["year"].unique()))
+        _base_year_growth = _latest_year - 3  # post-COVID 3-yr CAGR window
 
-    # Merge in YoY % change
-    yoy_export = df_yoy[["year", "yoy"]].copy()
-    yoy_export["year"] = yoy_export["year"].apply(yr_label)
-    yoy_export.columns = ["Year", "YoY % Change"]
-    if "Award Level" in download_df.columns:
-        # aggregate to total per year first, then merge
-        totals = download_df.groupby("Year")["Completions"].sum().reset_index()
-        totals = totals.merge(yoy_export, on="Year", how="left")
-        download_df = download_df.merge(totals[["Year", "YoY % Change"]], on="Year", how="left")
-    else:
-        download_df = download_df.merge(yoy_export, on="Year", how="left")
+        # Metric toggle (Volume / Growth / Projected) — drives BOTH the map
+        # and the ranking. State/Metro toggle is a sub-control inside the
+        # ranking column.
+        st.markdown(
+            f"<div class='vi-map-caption'>Geographic distribution · "
+            f"{yr_label(_latest_year)} completions</div>",
+            unsafe_allow_html=True,
+        )
+        _comp_metric = st.radio(
+            "Metric",
+            ["Volume", "Growth", "Projected"],
+            index=0,
+            horizontal=True,
+            key="comp_metric",
+            label_visibility="collapsed",
+        )
 
-    cip_slug = "all_programs" if all_cips else ("_".join(cip_label_to_code[l] for l in selected_cip_labels) or "completions")
-    fname_safe = (
-        f"ipeds_{cip_slug}"
-        f"_{geo_label.replace(', ', '_').replace(' ', '_')}.csv"
-    )
-    st.download_button(
-        "⬇️ Download CSV",
-        data=download_df.to_csv(index=False),
-        file_name=fname_safe,
-        mime="text/csv",
-    )
+        # Resolve SOC codes once — needed only for Projected.
+        _comp_soc_codes = (
+            resolve_soc_codes_for_cips(cip_patterns, selected_awlevels)
+            if _comp_metric == "Projected" else tuple()
+        )
+
+        # ── Build the per-state dataframe driving the choropleth ─────────
+        if _comp_metric == "Volume":
+            _state_df = run_completions_by_state_query(
+                cip_patterns=cip_patterns,
+                awlevels=selected_awlevels,
+                year=_latest_year,
+            )
+            _state_value_col = "completions"
+            _value_label = "Completions"
+            _value_format = "{:,.0f}"
+            _map_title = f"Completions by State — {yr_label(_latest_year)}"
+            _rank_title = f"Top States — {yr_label(_latest_year)}"
+        elif _comp_metric == "Growth":
+            _state_df = run_completions_state_cagr(
+                cip_patterns=cip_patterns,
+                awlevels=selected_awlevels,
+                base_year=_base_year_growth,
+                end_year=_latest_year,
+            )
+            _state_value_col = "cagr"
+            _value_label = "Post-COVID CAGR"
+            _value_format = "{:+.1%}"
+            _map_title = (
+                f"Post-COVID Completions CAGR — "
+                f"{yr_label(_base_year_growth)} → {yr_label(_latest_year)}"
+            )
+            _rank_title = "Fastest-Growing States"
+        else:  # Projected
+            if not _comp_soc_codes:
+                st.info(
+                    "Projected change requires CIP codes that map to BLS "
+                    "occupations. Try a different program selection."
+                )
+                _state_df = pd.DataFrame()
+            else:
+                _state_df = run_employment_projection_state(_comp_soc_codes)
+            _state_value_col = "cagr"
+            _value_label = "Projected CAGR (related occs)"
+            _value_format = "{:+.1%}"
+            _map_title = "Projected Annual Change — Related Occupations"
+            _rank_title = "Top States by Projected Growth"
+
+        # Need at least 3 states with the chosen metric to render the map.
+        _has_state_data = (
+            not _state_df.empty
+            and "stabbr" in _state_df.columns
+            and _state_df[_state_value_col].notna().sum() >= 3
+        )
+
+        if _has_state_data:
+            _state_df = _state_df.dropna(subset=[_state_value_col])
+            _map_col, _rank_col = st.columns([3, 2])
+            with _map_col:
+                _fig_map = vi_choropleth(
+                    _state_df["stabbr"],
+                    _state_df[_state_value_col],
+                    title=_map_title,
+                    colorbar_title=_value_label,
+                    hover_format=_value_format,
+                    hover_label=_value_label,
+                )
+                st.plotly_chart(_fig_map, use_container_width=True)
+
+            with _rank_col:
+                _rank_grain = st.radio(
+                    "Show ranking by:",
+                    ["State", "Metro"],
+                    index=0,
+                    horizontal=True,
+                    key="comp_rank_grain",
+                    label_visibility="collapsed",
+                )
+
+                if _rank_grain == "State":
+                    _rank_df = _state_df.sort_values(
+                        _state_value_col, ascending=False, na_position="last"
+                    ).head(15)
+                    _rank_fig = vi_ranking_bar(
+                        _rank_df["stabbr"],
+                        _rank_df[_state_value_col],
+                        title=_rank_title,
+                        value_label=_value_label,
+                        value_format=_value_format,
+                    )
+                else:  # Metro
+                    if _comp_metric == "Volume":
+                        _metro_df = run_completions_by_metro_query(
+                            cip_patterns=cip_patterns,
+                            awlevels=selected_awlevels,
+                            year=_latest_year, top_n=15,
+                        )
+                        _metro_value_col = "completions"
+                    elif _comp_metric == "Growth":
+                        _metro_df = run_completions_metro_cagr(
+                            cip_patterns=cip_patterns,
+                            awlevels=selected_awlevels,
+                            base_year=_base_year_growth,
+                            end_year=_latest_year, top_n=15,
+                        )
+                        _metro_value_col = "cagr"
+                    else:  # Projected
+                        _metro_df = (
+                            run_employment_projection_metro(
+                                _comp_soc_codes, top_n=15,
+                            )
+                            if _comp_soc_codes else pd.DataFrame()
+                        )
+                        _metro_value_col = "cagr"
+
+                    if _metro_df is None or _metro_df.empty:
+                        st.info("No metro-level data for this metric.")
+                        _rank_fig = None
+                    else:
+                        _rank_fig = vi_ranking_bar(
+                            _metro_df["cbsa_name"],
+                            _metro_df[_metro_value_col],
+                            title=(
+                                _rank_title.replace("States", "Metros")
+                            ),
+                            value_label=_value_label,
+                            value_format=_value_format,
+                        )
+
+                if _rank_fig is not None:
+                    st.plotly_chart(_rank_fig, use_container_width=True)
 
     # Footnote listing CIP codes and award levels included
     if all_cips:
@@ -2903,412 +4592,6 @@ def main():
         _cip_note = f"**{len(selected_cip_labels)}** CIP code(s):  \n{_cip_bullets}"
     _level_note = "All award levels" if all_levels else ", ".join(selected_level_labels)
     st.caption(f"Includes {_cip_note}  \nAward level(s): {_level_note}")
-
-    # ── By Institution ────────────────────────────────────────────────────────
-    st.divider()
-    st.subheader("Completions by Institution")
-
-    if df_inst.empty:
-        st.info("No institution-level data for these filters.")
-    else:
-        # Get latest metadata per unitid (name may change across years)
-        meta = (
-            df_inst.sort_values("year")
-            .groupby("unitid")[["instnm", "city", "stabbr", "control_name"]]
-            .last()
-            .reset_index()
-        )
-
-        # Pivot on unitid only so name changes don't split rows
-        pivot = df_inst.pivot_table(
-            index="unitid",
-            columns="year",
-            values="completions",
-            aggfunc="sum",
-            fill_value=0,
-        ).reset_index()
-        pivot = pivot.merge(meta, on="unitid", how="left")
-        pivot.columns.name = None
-        yr_cols = sorted([c for c in pivot.columns if isinstance(c, int)])
-
-        # CAGR per institution (stored as %, e.g. 2.3 means 2.3%)
-        first_col, last_col = yr_cols[0], yr_cols[-1]
-        n_years = last_col - first_col
-        col_3ago = last_col - 3
-
-        def inst_cagr(row, start_col, n):
-            fv, lv = row[start_col], row[last_col]
-            if fv > 0 and lv > 0 and n > 0:
-                return ((lv / fv) ** (1 / n) - 1) * 100
-            return None
-
-        if col_3ago in yr_cols:
-            pivot["3-yr CAGR"] = pivot.apply(lambda r: inst_cagr(r, col_3ago, 3), axis=1)
-        pivot["10-yr CAGR"] = pivot.apply(lambda r: inst_cagr(r, first_col, n_years), axis=1)
-        pivot = pivot.rename(columns={y: yr_label_short(y) for y in yr_cols})
-        last_yr_short = yr_label_short(last_col)
-        pivot = pivot.sort_values(last_yr_short, ascending=False, na_position="last").reset_index(drop=True)
-        control_map = {"Public": "Public", "Private nonprofit": "Private", "Private for-profit": "For-Profit"}
-        pivot["control_name"] = pivot["control_name"].map(control_map).fillna(pivot["control_name"])
-        pivot["city"] = pivot["city"] + ", " + pivot["stabbr"]
-        pivot = pivot.drop(columns=["unitid", "stabbr"])
-        pivot = pivot.rename(columns={"instnm": "Institution", "city": "City", "control_name": "Control"})
-        cagr_cols = [c for c in ["3-yr CAGR", "10-yr CAGR"] if c in pivot.columns]
-        yr_short_labels = [yr_label_short(y) for y in yr_cols]
-        pivot = pivot[["Institution", "City", "Control"] + yr_short_labels + cagr_cols]
-
-        n_institutions = len(pivot)
-        st.caption(f"{n_institutions:,} institutions reported completions for these filters")
-
-        # Smaller font for the institution table
-        st.markdown(
-            "<style>div[data-testid='stDataFrame'] table {font-size: 0.78rem;}</style>",
-            unsafe_allow_html=True,
-        )
-
-        # Compute column widths so the table fits without horizontal scroll.
-        n_yr = len(yr_short_labels)
-        n_cagr = len(cagr_cols)
-        yr_col_w = 62
-        cagr_col_w = 72
-        control_col_w = 68
-        fixed_w = n_yr * yr_col_w + n_cagr * cagr_col_w + control_col_w
-        remaining = max(400, 1100 - fixed_w)
-        inst_w = int(remaining * 0.6)
-        city_w = remaining - inst_w
-
-        col_cfg = {
-            "Institution": st.column_config.TextColumn("Institution", width=inst_w),
-            "City": st.column_config.TextColumn("City", width=city_w),
-            "Control": st.column_config.TextColumn("Control", width=control_col_w),
-            **{
-                yr_label_short(y): st.column_config.NumberColumn(
-                    yr_label_short(y), format="%,d", width=yr_col_w,
-                )
-                for y in yr_cols
-            },
-        }
-        if "3-yr CAGR" in cagr_cols:
-            col_cfg["3-yr CAGR"] = st.column_config.NumberColumn(
-                f"3-yr CAGR ({yr_label_short(col_3ago)} → {yr_label_short(last_col)})",
-                format="%.1f%%",
-                width=cagr_col_w,
-            )
-        if "10-yr CAGR" in cagr_cols:
-            col_cfg["10-yr CAGR"] = st.column_config.NumberColumn(
-                f"10-yr CAGR ({yr_label_short(first_col)} → {yr_label_short(last_col)})",
-                format="%.1f%%",
-                width=cagr_col_w,
-            )
-
-        st.dataframe(
-            pivot,
-            use_container_width=True,
-            hide_index=True,
-            column_config=col_cfg,
-        )
-
-        cip_slug = "all_programs" if all_cips else ("_".join(cip_label_to_code[l] for l in selected_cip_labels) or "completions")
-        fname_inst = (
-            f"ipeds_{cip_slug}"
-            f"_{geo_label.replace(', ', '_').replace(' ', '_')}_by_institution.csv"
-        )
-        st.download_button(
-            "⬇️ Download CSV",
-            data=pivot.to_csv(index=False),
-            file_name=fname_inst,
-            mime="text/csv",
-            key="dl_inst",
-        )
-
-    # ── Distance Education Programs ──────────────────────────────────────────
-    st.divider()
-    st.subheader("Distance Education Programs")
-    st.caption(
-        "Number of programs offered and share available via distance education "
-        "| Source: IPEDS Completions DEP Survey"
-    )
-
-    _dep_ok = False
-    try:
-        _dep_conn = get_conn()
-        _dep_conn.execute("SELECT 1 FROM completions_dep LIMIT 1")
-        _dep_conn.close()
-        _dep_ok = True
-    except Exception:
-        pass
-
-    if not _dep_ok:
-        st.info("Distance education program data not loaded.")
-    elif all_cips:
-        st.info(
-            "Distance education data is shown when specific CIP code(s) are "
-            "selected. Deselect **All CIP codes** and choose program(s)."
-        )
-    else:
-        with st.spinner("Querying distance education data..."):
-            df_dep = run_dep_query(
-                cip_patterns=cip_patterns,
-                awlevels=selected_awlevels,
-                geo_key=geo_key,
-                geo_values=tuple(geo_values),
-            )
-
-        if df_dep is None or df_dep.empty:
-            st.info("No distance education program data for these filters.")
-        else:
-            # ── Metrics ──────────────────────────────────────────────
-            _dep_latest = df_dep.iloc[-1]
-            _dep_earliest = df_dep.iloc[0]
-            _latest_yr = int(_dep_latest["year"])
-            _earliest_yr = int(_dep_earliest["year"])
-
-            _total_progs = int(_dep_latest["programs"])
-            _de_any = int(_dep_latest["programs_de_any"])
-            _pct_de = _dep_latest["pct_de_any"]
-
-            # Change in DE % over full period
-            _pct_de_first = _dep_earliest["pct_de_any"]
-            _pct_change = (
-                _pct_de - _pct_de_first
-                if pd.notna(_pct_de) and pd.notna(_pct_de_first) else None
-            )
-
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric(
-                f"Programs Offered ({yr_label(_latest_yr)})",
-                f"{_total_progs:,}",
-            )
-            d2.metric(
-                "DE Programs (Any)",
-                f"{_de_any:,}",
-                help="Programs completable entirely or partially "
-                     "via distance education.",
-            )
-            d3.metric(
-                "DE Share",
-                f"{_pct_de:.1f}%",
-            )
-            d4.metric(
-                f"DE Share Change ({yr_label(_earliest_yr)}-{yr_label(_latest_yr)})",
-                f"{_pct_change:+.1f} pp" if _pct_change is not None else "N/A",
-                help="Percentage point change in DE share over the period.",
-            )
-
-            # ── Dual-axis chart: programs (bars) + DE % (line) ───────
-            fig_dep = make_subplots(specs=[[{"secondary_y": True}]])
-
-            fig_dep.add_trace(go.Bar(
-                x=df_dep["year"].apply(yr_label),
-                y=df_dep["programs"],
-                name="Total Programs",
-                marker=dict(color="rgba(15, 134, 193, 0.25)"),
-                hovertemplate="%{y:,} programs<extra></extra>",
-            ), secondary_y=False)
-
-            fig_dep.add_trace(go.Bar(
-                x=df_dep["year"].apply(yr_label),
-                y=df_dep["programs_de_any"],
-                name="DE Programs (Any)",
-                marker=dict(color="rgba(139, 92, 246, 0.6)"),
-                hovertemplate="%{y:,} DE programs<extra></extra>",
-            ), secondary_y=False)
-
-            fig_dep.add_trace(go.Scatter(
-                x=df_dep["year"].apply(yr_label),
-                y=df_dep["pct_de_any"],
-                name="DE Share %",
-                mode="lines+markers",
-                line=dict(width=2.5, color="#f26822"),
-                marker=dict(size=6, color="#f26822"),
-                hovertemplate="%{y:.1f}%<extra></extra>",
-            ), secondary_y=True)
-
-            fig_dep.update_yaxes(
-                title_text="Programs Offered",
-                showgrid=True, gridcolor="#F3F4F6", gridwidth=1,
-                rangemode="tozero",
-                secondary_y=False,
-            )
-            fig_dep.update_yaxes(
-                title_text="DE Share (%)",
-                showgrid=False,
-                rangemode="tozero",
-                ticksuffix="%",
-                secondary_y=True,
-            )
-            fig_dep.update_layout(
-                title=dict(
-                    text="<b>Distance Education Programs Over Time</b>",
-                    font=dict(size=15), x=0, xanchor="left",
-                ),
-                xaxis=dict(title="", showgrid=False),
-                height=400,
-                margin=dict(t=60, b=40, l=60, r=60),
-                plot_bgcolor="white",
-                paper_bgcolor="white",
-                font=dict(
-                    family="Montserrat, Arial, sans-serif",
-                    size=12, color="#333333",
-                ),
-                barmode="overlay",
-                showlegend=True,
-                legend=dict(
-                    orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="left", x=0, font=dict(size=11),
-                ),
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig_dep, use_container_width=True)
-
-    # ── Graduate Outcomes (College Scorecard) ────────────────────────────────
-    st.divider()
-    st.subheader("Graduate Outcomes")
-    st.caption(
-        "Median earnings 4 years post-graduation and median debt at completion "
-        "| Source: U.S. Department of Education College Scorecard"
-    )
-
-    _scorecard_ok = False
-    try:
-        _sc_conn = get_conn()
-        _sc_conn.execute("SELECT 1 FROM college_scorecard LIMIT 1")
-        _sc_conn.close()
-        _scorecard_ok = True
-    except Exception:
-        pass
-
-    if not _scorecard_ok:
-        st.info("Scorecard outcomes data not available.")
-    elif all_cips:
-        st.info(
-            "Graduate outcomes data is shown when specific CIP code(s) are selected. "
-            "Deselect **All CIP codes** and choose program(s) to see outcomes."
-        )
-    else:
-        with st.spinner("Querying graduate outcomes..."):
-            df_sc = run_scorecard_query(
-                cip_patterns=cip_patterns,
-                awlevels=selected_awlevels,
-                geo_key=geo_key,
-                geo_values=tuple(geo_values),
-            )
-
-        if df_sc.empty:
-            st.info(
-                "No graduate outcomes data available for these filters. "
-                "Scorecard data is reported at the 4-digit CIP level and may not "
-                "cover all institution / program combinations."
-            )
-        else:
-            # Deduplicate across distance modes (keep highest earnings per institution)
-            df_sc = (
-                df_sc
-                .sort_values("earn_mdn_4yr", ascending=False)
-                .drop_duplicates(subset=["unitid"], keep="first")
-            )
-
-            # ── Metrics row ───────────────────────────────────────────────
-            n_inst = df_sc["unitid"].nunique()
-            med_earn = df_sc["earn_mdn_4yr"].median()
-
-            _sc_debt = df_sc.dropna(subset=["debt_all_stgp_eval_mdn"])
-            med_debt = _sc_debt["debt_all_stgp_eval_mdn"].median() if not _sc_debt.empty else None
-
-            # Compute D/E from the displayed medians so the ratio is consistent
-            # with the earnings and debt metrics shown (ratio-of-medians, not
-            # median-of-ratios which can diverge due to Simpson's-paradox effects).
-            if med_earn and med_earn > 0 and med_debt is not None:
-                med_dte = med_debt / med_earn
-            else:
-                med_dte = None
-
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            sc1.metric(
-                "Median Earnings (4yr Post-Grad)",
-                f"${med_earn:,.0f}" if med_earn else "N/A",
-            )
-            sc2.metric(
-                "Median Debt at Completion",
-                f"${med_debt:,.0f}" if med_debt else "N/A",
-            )
-            sc3.metric(
-                "Median Debt-to-Earnings",
-                f"{med_dte:.2f}x" if med_dte else "N/A",
-            )
-            sc4.metric("Institutions with Data", f"{n_inst:,}")
-
-            # ── Detail table ──────────────────────────────────────────────
-            sc_display = df_sc.rename(columns={
-                "instnm": "Institution",
-                "city": "City",
-                "control_name": "Control",
-                "earn_mdn_4yr": "Median Earnings (4yr)",
-                "debt_all_stgp_eval_mdn": "Median Debt",
-                "debt_to_earnings": "Debt/Earnings",
-            })
-            sc_display = sc_display.sort_values(
-                "Debt/Earnings", ascending=True, na_position="last"
-            )
-            sc_display = sc_display[
-                ["Institution", "City", "Control",
-                 "Median Earnings (4yr)", "Median Debt", "Debt/Earnings"]
-            ].reset_index(drop=True)
-
-            # Check if any selected 6-digit CIPs share the same 4-digit prefix
-            # (Scorecard data is at 4-digit granularity)
-            if cip_patterns:
-                _sc_4digit = {p[:5] for p in cip_patterns if "%" not in p}
-                _sc_6digit = {p for p in cip_patterns if "%" not in p and len(p) > 5}
-                if len(_sc_6digit) > 0 and len(_sc_4digit) < len(_sc_6digit):
-                    st.caption(
-                        f":information_source: College Scorecard reports outcomes at the 4-digit CIP level "
-                        f"(e.g. {sorted(_sc_4digit)[0]}), so results may include related programs "
-                        f"that share the same prefix."
-                    )
-
-            st.caption(f"{len(sc_display):,} program–institution combinations with earnings data")
-
-            sc_col_cfg = {
-                "Institution": st.column_config.TextColumn("Institution", width=250),
-                "City": st.column_config.TextColumn("City", width=160),
-                "Control": st.column_config.TextColumn("Control", width=85),
-                "Median Earnings (4yr)": st.column_config.NumberColumn(
-                    "Median Earnings (4yr)", format="$%,.0f", width=155,
-                ),
-                "Median Debt": st.column_config.NumberColumn(
-                    "Median Debt", format="$%,.0f", width=120,
-                ),
-                "Debt/Earnings": st.column_config.NumberColumn(
-                    "Debt/Earnings", format="%.2fx", width=115,
-                ),
-            }
-
-            st.dataframe(
-                sc_display,
-                use_container_width=True,
-                hide_index=True,
-                column_config=sc_col_cfg,
-                height=min(len(sc_display) * 35 + 40, 600),
-            )
-
-            # ── Download CSV ──────────────────────────────────────────────
-            sc_slug = "all_programs" if all_cips else (
-                "_".join(
-                    cip_label_to_code[l] for l in selected_cip_labels
-                ) or "outcomes"
-            )
-            sc_fname = (
-                f"scorecard_{sc_slug}"
-                f"_{geo_label.replace(', ', '_').replace(' ', '_')}.csv"
-            )
-            st.download_button(
-                "Download CSV",
-                data=sc_display.to_csv(index=False),
-                file_name=sc_fname,
-                mime="text/csv",
-                key="dl_scorecard",
-            )
 
     # ── Search Interest Trends ────────────────────────────────────────────────
     st.divider()
@@ -3631,6 +4914,69 @@ def main():
             )
             st.plotly_chart(fig_trend, use_container_width=True)
 
+            # ── Month-over-Month % change bar chart ──────────────────────
+            # Mirrors the YoY bar chart in the Completions section, but at
+            # monthly resolution. Trimmed to the most recent 24 months so
+            # the bars stay readable. Falls back to the interest index when
+            # no volume calibration is present.
+            _mom_src = (
+                _volume_series.copy()
+                if (_show_volume and _volume_series is not None
+                    and not _volume_series.empty)
+                else df_trend.copy()
+            )
+            _mom_value_col = "volume" if "volume" in _mom_src.columns else "interest"
+            if len(_mom_src) >= 2:
+                _mom_src = _mom_src.sort_values("date").tail(25).copy()
+                _mom_src["mom"] = _mom_src[_mom_value_col].pct_change() * 100
+                _mom_src = _mom_src.dropna(subset=["mom"])
+                if not _mom_src.empty:
+                    _mom_src["color"] = _mom_src["mom"].apply(
+                        lambda v: "#16a34a" if v >= 0 else "#dc2626"
+                    )
+                    _mom_src["text"] = _mom_src["mom"].apply(
+                        lambda v: f"+{v:.1f}%" if v >= 0 else f"{v:.1f}%"
+                    )
+                    fig_mom = go.Figure(go.Bar(
+                        x=_mom_src["date"],
+                        y=_mom_src["mom"],
+                        marker_color=_mom_src["color"],
+                        text=_mom_src["text"],
+                        textposition="outside",
+                        textfont=dict(
+                            size=9,
+                            family="Montserrat, Arial, sans-serif",
+                            color="#333333",
+                        ),
+                        hovertemplate="%{x|%b %Y}<br>%{text}<extra></extra>",
+                    ))
+                    fig_mom.update_layout(
+                        title=dict(
+                            text="Month-over-Month % Change",
+                            font=dict(size=13), x=0, xanchor="left",
+                        ),
+                        xaxis=dict(
+                            title="", showgrid=True, gridcolor="#F3F4F6",
+                            tickformat="%b %Y", tickangle=-45,
+                        ),
+                        yaxis=dict(
+                            ticksuffix="%", tickformat=".1f",
+                            showgrid=True, gridcolor="#F3F4F6",
+                            zeroline=True, zerolinecolor="#999999",
+                            zerolinewidth=1,
+                        ),
+                        height=240,
+                        margin=dict(t=40, b=70, l=70, r=20),
+                        plot_bgcolor="white",
+                        paper_bgcolor="white",
+                        font=dict(
+                            family="Montserrat, Arial, sans-serif",
+                            size=12, color="#333333",
+                        ),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig_mom, use_container_width=True)
+
             # ── Chart 2 & 3: State Map + Top Metro Markets (side by side)
             df_states = trends_data["state_data"]
             df_metros = trends_data["top_metros"]
@@ -3641,176 +4987,230 @@ def main():
             _has_metro_chart = not df_metros.empty and len(df_metros) > 0
 
             if _has_state_chart or _has_metro_chart:
-                if _has_state_chart and _has_metro_chart:
-                    col_map, col_bar = st.columns([3, 2])
-                elif _has_state_chart:
-                    col_map = st.container()
+                # ── Volume / Growth metric toggle ─────────────────────
+                # Growth is only available when state-level monthly data
+                # has been loaded (run load_google_trends_state_time.py).
+                # We probe the table once and offer the option only if at
+                # least one (CIP, state) pair has time-series data — for
+                # the user's currently-selected CIPs.
+                _state_time_loaded = (
+                    search_traffic_state_time_coverage(cip_patterns) > 0
+                )
+                _metric_opts = ["Volume"]
+                if _state_time_loaded:
+                    _metric_opts.append("Growth")
+
+                if len(_metric_opts) > 1:
+                    _search_metric = st.radio(
+                        "Metric",
+                        _metric_opts,
+                        index=0,
+                        horizontal=True,
+                        key="search_metric",
+                        label_visibility="collapsed",
+                    )
                 else:
+                    _search_metric = "Volume"
+                    st.caption(
+                        "Tip: load per-state historical Trends "
+                        "(`python load_google_trends_state_time.py "
+                        f"--cips {','.join(cip_patterns) if cip_patterns else '...'}`) "
+                        "to enable a Growth view that compares the most "
+                        "recent 12 months against the prior 12 months by state."
+                    )
+
+                # Layout — same 3:2 in Volume mode; state-only in Growth.
+                if _has_state_chart:
+                    col_map, col_bar = st.columns([3, 2])
+                else:
+                    col_map = None
                     col_bar = st.container()
+
+                if _search_metric == "Growth":
+                    _growth_df = run_search_traffic_state_growth(cip_patterns)
+                else:
+                    _growth_df = None
 
                 # ── Choropleth map ────────────────────────────────────
                 if _has_state_chart:
                     with col_map:
-                        _use_state_vol = (
-                            _show_volume
-                            and _state_vol is not None
-                            and not _state_vol.empty
+                        if _search_metric == "Growth":
+                            if _growth_df is None or _growth_df.empty:
+                                st.info(
+                                    "No state-level historical data is "
+                                    "loaded yet for the selected CIP(s). "
+                                    "Run `load_google_trends_state_time.py`."
+                                )
+                            else:
+                                fig_growth_map = vi_choropleth(
+                                    _growth_df["stabbr"],
+                                    _growth_df["pct_change"],
+                                    title="Search Interest — 12-mo Rolling Change by State",
+                                    colorbar_title="12-mo % change",
+                                    hover_format="{:+.1%}",
+                                    hover_label="12-mo change",
+                                )
+                                st.plotly_chart(
+                                    fig_growth_map, use_container_width=True,
+                                )
+                        else:
+                            _use_state_vol = (
+                                _show_volume
+                                and _state_vol is not None
+                                and not _state_vol.empty
+                            )
+                            _map_z = (
+                                _state_vol["volume"] if _use_state_vol
+                                else df_states["interest"]
+                            )
+                            _map_locs = (
+                                _state_vol["state_abbr"] if _use_state_vol
+                                else df_states["state_abbr"]
+                            )
+                            _map_cbar_title = (
+                                "Est. Searches" if _use_state_vol else "Interest"
+                            )
+                            _map_hover = (
+                                "<b>%{location}</b><br>"
+                                "Est. Searches: %{z:,.0f}"
+                                "<extra></extra>"
+                            ) if _use_state_vol else (
+                                "<b>%{location}</b><br>"
+                                "Interest: %{z:.0f}/100"
+                                "<extra></extra>"
+                            )
+                            _map_title = (
+                                "<b>Estimated Search Volume by State</b>"
+                                if _use_state_vol
+                                else "<b>Search Interest by State</b>"
+                            )
+
+                            fig_map = go.Figure(go.Choropleth(
+                                locations=_map_locs,
+                                z=_map_z,
+                                locationmode="USA-states",
+                                colorscale=VI_CHOROPLETH_SCALE,
+                                marker=dict(line=dict(color="white", width=0.6)),
+                                colorbar=dict(
+                                    title=_map_cbar_title,
+                                    thickness=12,
+                                    len=0.6,
+                                    tickfont=dict(size=10),
+                                ),
+                                hovertemplate=_map_hover,
+                            ))
+                            fig_map.update_layout(
+                                title=dict(
+                                    text=_map_title,
+                                    font=dict(size=14), x=0, xanchor="left",
+                                ),
+                                geo=dict(
+                                    scope="usa",
+                                    bgcolor="white",
+                                    lakecolor="white",
+                                    showlakes=True,
+                                    landcolor="#FAFAFA",
+                                    projection_type="albers usa",
+                                ),
+                                height=340,
+                                margin=dict(t=50, b=10, l=10, r=10),
+                                paper_bgcolor="white",
+                                font=dict(
+                                    family="Montserrat, Arial, sans-serif",
+                                    size=12, color="#333333",
+                                ),
+                            )
+                            st.plotly_chart(fig_map, use_container_width=True)
+
+                # ── Ranking (State / Metro toggle) ────────────────────
+                # Same VI-orange ranking helper as Completions/Employment.
+                # In Growth mode we skip the State/Metro toggle since
+                # metro-level historical Trends data isn't loaded.
+                with col_bar:
+                    if _search_metric == "Growth":
+                        if _growth_df is None or _growth_df.empty:
+                            _rank_search_fig = None
+                        else:
+                            _top = _growth_df.sort_values(
+                                "pct_change", ascending=False,
+                            ).head(15)
+                            _rank_search_fig = vi_ranking_bar(
+                                _top["stabbr"],
+                                _top["pct_change"],
+                                title="Fastest-Growing States (12-mo Δ)",
+                                value_label="12-mo change",
+                                value_format="{:+.1%}",
+                            )
+                    else:
+                        # Volume — preserve the existing State/Metro toggle.
+                        _grain_opts = []
+                        if _has_state_chart:
+                            _grain_opts.append("State")
+                        if _has_metro_chart:
+                            _grain_opts.append("Metro")
+
+                        if len(_grain_opts) > 1:
+                            _search_grain = st.radio(
+                                "Show ranking by:",
+                                _grain_opts,
+                                index=0,
+                                horizontal=True,
+                                key="search_rank_grain",
+                                label_visibility="collapsed",
+                            )
+                        else:
+                            _search_grain = _grain_opts[0]
+
+                        _use_vol = _show_volume
+
+                        if _search_grain == "State":
+                            _vol_ok = (
+                                _use_vol and _state_vol is not None
+                                and not _state_vol.empty
+                            )
+                            _src = _state_vol if _vol_ok else df_states
+                            _label_col = "state_abbr"
+                            _val_col = "volume" if _vol_ok else "interest"
+                            _value_label = "Est. Searches" if _vol_ok else "Interest"
+                            _value_format = (
+                                "{:,.0f}" if _vol_ok else "{:.0f}/100"
+                            )
+                            _title = (
+                                "Top States (by Est. Volume)" if _vol_ok
+                                else "Top States (by Interest)"
+                            )
+                        else:  # Metro
+                            _vol_ok = (
+                                _use_vol and _metro_vol is not None
+                                and not _metro_vol.empty
+                            )
+                            _src = _metro_vol if _vol_ok else df_metros
+                            _label_col = "cbsa_name"
+                            _val_col = "volume" if _vol_ok else "interest"
+                            _value_label = "Est. Searches" if _vol_ok else "Interest"
+                            _value_format = (
+                                "{:,.0f}" if _vol_ok else "{:.0f}/100"
+                            )
+                            _title = (
+                                "Top Metros (by Est. Volume)" if _vol_ok
+                                else "Top Metros (by Interest)"
+                            )
+
+                        _top = (
+                            _src.sort_values(_val_col, ascending=False)
+                                .head(15)
                         )
-                        _map_z = (
-                            _state_vol["volume"] if _use_state_vol
-                            else df_states["interest"]
-                        )
-                        _map_locs = (
-                            _state_vol["state_abbr"] if _use_state_vol
-                            else df_states["state_abbr"]
-                        )
-                        _map_cbar_title = (
-                            "Est. Searches" if _use_state_vol else "Interest"
-                        )
-                        _map_hover = (
-                            "<b>%{location}</b><br>"
-                            "Est. Searches: %{z:,.0f}"
-                            "<extra></extra>"
-                        ) if _use_state_vol else (
-                            "<b>%{location}</b><br>"
-                            "Interest: %{z:.0f}/100"
-                            "<extra></extra>"
-                        )
-                        _map_title = (
-                            "<b>Estimated Search Volume by State</b>"
-                            if _use_state_vol
-                            else "<b>Search Interest by State</b>"
+                        _rank_search_fig = vi_ranking_bar(
+                            _top[_label_col],
+                            _top[_val_col],
+                            title=_title,
+                            value_label=_value_label,
+                            value_format=_value_format,
                         )
 
-                        fig_map = go.Figure(go.Choropleth(
-                            locations=_map_locs,
-                            z=_map_z,
-                            locationmode="USA-states",
-                            colorscale=[
-                                [0, "#F5F3FF"],
-                                [0.25, "#DDD6FE"],
-                                [0.5, "#A78BFA"],
-                                [0.75, "#7C3AED"],
-                                [1, "#4C1D95"],
-                            ],
-                            colorbar=dict(
-                                title=_map_cbar_title,
-                                thickness=12,
-                                len=0.6,
-                                tickfont=dict(size=10),
-                            ),
-                            hovertemplate=_map_hover,
-                        ))
-                        fig_map.update_layout(
-                            title=dict(
-                                text=_map_title,
-                                font=dict(size=14), x=0, xanchor="left",
-                            ),
-                            geo=dict(
-                                scope="usa",
-                                bgcolor="white",
-                                lakecolor="white",
-                                showlakes=True,
-                                landcolor="#FAFAFA",
-                                projection_type="albers usa",
-                            ),
-                            height=340,
-                            margin=dict(t=50, b=10, l=10, r=10),
-                            paper_bgcolor="white",
-                            font=dict(
-                                family="Montserrat, Arial, sans-serif",
-                                size=12, color="#333333",
-                            ),
-                        )
+                    if _rank_search_fig is not None:
                         st.plotly_chart(
-                            fig_map, use_container_width=True
-                        )
-
-                # ── Top Metro Markets bar chart ───────────────────────
-                if _has_metro_chart:
-                    with col_bar:
-                        _use_metro_vol = (
-                            _show_volume
-                            and _metro_vol is not None
-                            and not _metro_vol.empty
-                        )
-                        _bar_src = (
-                            _metro_vol if _use_metro_vol else df_metros
-                        )
-                        _bar_val_col = "volume" if _use_metro_vol else "interest"
-
-                        # Reverse for horizontal bar (highest at top)
-                        df_bar = _bar_src.sort_values(
-                            _bar_val_col, ascending=True
-                        ).tail(15)
-                        # Truncate long CBSA names for display
-                        df_bar["label"] = df_bar["cbsa_name"].apply(
-                            lambda n: (n[:28] + "...") if len(n) > 30 else n
-                        )
-
-                        _bar_hover = (
-                            "<b>%{y}</b><br>"
-                            "Est. Searches: %{x:,.0f}"
-                            "<extra></extra>"
-                        ) if _use_metro_vol else (
-                            "<b>%{y}</b><br>"
-                            "Interest: %{x:.0f}/100"
-                            "<extra></extra>"
-                        )
-                        _bar_x_title = (
-                            "Est. Monthly Searches"
-                            if _use_metro_vol else "Interest (0-100)"
-                        )
-                        _bar_x_range = (
-                            None if _use_metro_vol else [0, 105]
-                        )
-                        _bar_title = (
-                            "<b>Top Metro Markets (by Volume)</b>"
-                            if _use_metro_vol
-                            else "<b>Top Metro Markets</b>"
-                        )
-
-                        fig_bar = go.Figure(go.Bar(
-                            x=df_bar[_bar_val_col],
-                            y=df_bar["label"],
-                            orientation="h",
-                            marker=dict(
-                                color=df_bar[_bar_val_col],
-                                colorscale=[
-                                    [0, "#DDD6FE"],
-                                    [0.5, "#A78BFA"],
-                                    [1, "#7C3AED"],
-                                ],
-                            ),
-                            hovertemplate=_bar_hover,
-                        ))
-                        fig_bar.update_layout(
-                            title=dict(
-                                text=_bar_title,
-                                font=dict(size=14), x=0, xanchor="left",
-                            ),
-                            xaxis=dict(
-                                title=_bar_x_title,
-                                showgrid=True, gridcolor="#F3F4F6",
-                                gridwidth=1, range=_bar_x_range,
-                            ),
-                            yaxis=dict(
-                                title="",
-                                tickfont=dict(size=10),
-                            ),
-                            height=340,
-                            margin=dict(t=50, b=40, l=10, r=20),
-                            plot_bgcolor="white",
-                            paper_bgcolor="white",
-                            font=dict(
-                                family="Montserrat, Arial, sans-serif",
-                                size=12, color="#333333",
-                            ),
-                            showlegend=False,
-                            bargap=0.25,
-                        )
-                        st.plotly_chart(
-                            fig_bar, use_container_width=True
+                            _rank_search_fig, use_container_width=True,
                         )
 
             _terms_display = ", ".join(
@@ -3839,6 +5239,23 @@ def main():
     # ── Related Employment by Occupation ─────────────────────────────────────
     st.divider()
     st.subheader("Related Employment by Occupation")
+    if _windows.get("oes"):
+        _oes_min, _oes_max = _windows["oes"]
+        _oes_window = f"{_oes_min} – {_oes_max}"
+    else:
+        _oes_window = "available years"
+    st.caption(
+        "Total employment and median annual wages for occupations linked to "
+        "the selected CIP code(s) via the NCES CIP-SOC crosswalk. "
+        "Pre-2019 BLS data uses SOC 2010 codes, which are bridged to SOC 2018 "
+        "via the BLS crossover table; combined codes (e.g. 15-1256) are "
+        "remapped to their primary detail code. **Projected CAGR** is the "
+        "weighted-average BLS Employment Projections growth rate (current → "
+        "+10 yr) across the matched occupations, weighted by latest-year "
+        f"employment. Coverage: {_oes_window}. "
+        "| Sources: BLS Occupational Employment & Wage Statistics (OEWS), "
+        "BLS Employment Projections, NCES CIP-to-SOC Crosswalk."
+    )
 
     if all_cips:
         st.info(
@@ -3936,11 +5353,11 @@ def main():
                         f"{emp_latest:,}",
                     )
                     em2.metric(
-                        f"10-yr CAGR ({emp_years[0]} → {emp_years[-1]})",
+                        f"Past Decade CAGR ({emp_years[0]} → {emp_years[-1]})",
                         f"{emp_cagr:+.1%}" if emp_cagr is not None else "N/A",
                     )
                     em3.metric(
-                        f"3-yr CAGR ({emp_yr_3ago} → {latest_emp_year})",
+                        f"Post-COVID CAGR ({emp_yr_3ago} → {latest_emp_year})",
                         f"{emp_3yr_cagr:+.1%}" if emp_3yr_cagr is not None else "N/A",
                     )
                     em4.metric(
@@ -4137,6 +5554,140 @@ def main():
                     )
                     st.plotly_chart(fig_emp_yoy, use_container_width=True)
 
+                    # ── Related Employment geographic distribution ────────────
+                    _emp_socs = tuple(df_emp["occ_code"].unique())
+                    _emp_base_year_growth = int(latest_emp_year) - 3
+                    st.markdown(
+                        f"<div class='vi-map-caption'>Geographic distribution · "
+                        f"{int(latest_emp_year)} related employment</div>",
+                        unsafe_allow_html=True,
+                    )
+                    _emp_metric = st.radio(
+                        "Metric",
+                        ["Volume", "Growth", "Projected"],
+                        index=0,
+                        horizontal=True,
+                        key="emp_metric",
+                        label_visibility="collapsed",
+                    )
+
+                    # ── Per-state dataframe driving the choropleth ──────
+                    if _emp_metric == "Volume":
+                        _emp_state_df = run_employment_by_state_query(
+                            soc_codes=_emp_socs,
+                            year=int(latest_emp_year),
+                        )
+                        _emp_state_value_col = "tot_emp"
+                        _emp_value_label = "Employed"
+                        _emp_value_format = "{:,.0f}"
+                        _emp_map_title = (
+                            f"Related Employment by State — {int(latest_emp_year)}"
+                        )
+                        _emp_rank_title = f"Top States — {int(latest_emp_year)}"
+                    elif _emp_metric == "Growth":
+                        _emp_state_df = run_employment_state_cagr(
+                            soc_codes=_emp_socs,
+                            base_year=_emp_base_year_growth,
+                            end_year=int(latest_emp_year),
+                        )
+                        _emp_state_value_col = "cagr"
+                        _emp_value_label = "Post-COVID CAGR"
+                        _emp_value_format = "{:+.1%}"
+                        _emp_map_title = (
+                            f"Post-COVID Employment CAGR — "
+                            f"{_emp_base_year_growth} → {int(latest_emp_year)}"
+                        )
+                        _emp_rank_title = "Fastest-Growing States"
+                    else:  # Projected
+                        _emp_state_df = run_employment_projection_state(_emp_socs)
+                        _emp_state_value_col = "cagr"
+                        _emp_value_label = "Projected CAGR"
+                        _emp_value_format = "{:+.1%}"
+                        _emp_map_title = "Projected Annual Change — Related Occupations"
+                        _emp_rank_title = "Top States by Projected Growth"
+
+                    _emp_has_state = (
+                        not _emp_state_df.empty
+                        and "stabbr" in _emp_state_df.columns
+                        and _emp_state_df[_emp_state_value_col].notna().sum() >= 5
+                    )
+
+                    if _emp_has_state:
+                        _emp_state_df = _emp_state_df.dropna(
+                            subset=[_emp_state_value_col]
+                        )
+                        _emp_map_col, _emp_rank_col = st.columns([3, 2])
+                        with _emp_map_col:
+                            fig_emp_map = vi_choropleth(
+                                _emp_state_df["stabbr"],
+                                _emp_state_df[_emp_state_value_col],
+                                title=_emp_map_title,
+                                colorbar_title=_emp_value_label,
+                                hover_format=_emp_value_format,
+                                hover_label=_emp_value_label,
+                            )
+                            st.plotly_chart(fig_emp_map, use_container_width=True)
+
+                        with _emp_rank_col:
+                            _emp_rank_grain = st.radio(
+                                "Show ranking by:",
+                                ["State", "Metro"],
+                                index=0,
+                                horizontal=True,
+                                key="emp_rank_grain",
+                                label_visibility="collapsed",
+                            )
+                            if _emp_rank_grain == "State":
+                                _emp_rank_df = _emp_state_df.sort_values(
+                                    _emp_state_value_col,
+                                    ascending=False,
+                                    na_position="last",
+                                ).head(15)
+                                _emp_rank_fig = vi_ranking_bar(
+                                    _emp_rank_df["stabbr"],
+                                    _emp_rank_df[_emp_state_value_col],
+                                    title=_emp_rank_title,
+                                    value_label=_emp_value_label,
+                                    value_format=_emp_value_format,
+                                )
+                            else:  # Metro
+                                if _emp_metric == "Volume":
+                                    _df_metros_emp = run_employment_by_metro_query(
+                                        soc_codes=_emp_socs,
+                                        year=int(latest_emp_year),
+                                        top_n=15,
+                                    )
+                                    _emp_metro_value_col = "tot_emp"
+                                elif _emp_metric == "Growth":
+                                    _df_metros_emp = run_employment_metro_cagr(
+                                        soc_codes=_emp_socs,
+                                        base_year=_emp_base_year_growth,
+                                        end_year=int(latest_emp_year),
+                                        top_n=15,
+                                    )
+                                    _emp_metro_value_col = "cagr"
+                                else:  # Projected
+                                    _df_metros_emp = run_employment_projection_metro(
+                                        _emp_socs, top_n=15,
+                                    )
+                                    _emp_metro_value_col = "cagr"
+
+                                if _df_metros_emp is None or _df_metros_emp.empty:
+                                    st.info("No metro-level data for this metric.")
+                                    _emp_rank_fig = None
+                                else:
+                                    _emp_rank_fig = vi_ranking_bar(
+                                        _df_metros_emp["cbsa_name"],
+                                        _df_metros_emp[_emp_metro_value_col],
+                                        title=_emp_rank_title.replace(
+                                            "States", "Metros"
+                                        ),
+                                        value_label=_emp_value_label,
+                                        value_format=_emp_value_format,
+                                    )
+                            if _emp_rank_fig is not None:
+                                st.plotly_chart(_emp_rank_fig, use_container_width=True)
+
                 # Footnote listing the occupations included in the aggregate
                 occ_list = (
                     df_emp[["occ_code", "occ_title"]]
@@ -4152,7 +5703,442 @@ def main():
                 )
 
 
-    # ── Job Posting Trends (Coresignal) ── admin-only, on-demand ─────────────
+    # ── Graduate Outcomes (College Scorecard) ────────────────────────────────
+    st.divider()
+    st.subheader("Graduate Outcomes")
+    st.caption(
+        "**Median Earnings (4yr)** = median annual earnings of graduates "
+        "measured ~4 years after program completion (most-recent pooled cohort, "
+        "Title-IV-aided completers only, IRS earnings). "
+        "**Median Debt** = median total federal student-loan debt at "
+        "completion. **Debt/Earnings** = the ratio of those two — lower is "
+        "better. Outcomes are reported at the **4-digit CIP** level, so a "
+        "row may pool several closely-related 6-digit programs. "
+        "| Source: U.S. Department of Education College Scorecard, "
+        "Field-of-Study (Most-Recent-Cohorts) file."
+    )
+
+    _scorecard_ok = False
+    try:
+        _sc_conn = get_conn()
+        _sc_conn.execute("SELECT 1 FROM college_scorecard LIMIT 1")
+        _sc_conn.close()
+        _scorecard_ok = True
+    except Exception:
+        pass
+
+    if not _scorecard_ok:
+        st.info("Scorecard outcomes data not available.")
+    elif all_cips:
+        st.info(
+            "Graduate outcomes data is shown when specific CIP code(s) are selected. "
+            "Deselect **All CIP codes** and choose program(s) to see outcomes."
+        )
+    else:
+        with st.spinner("Querying graduate outcomes..."):
+            df_sc = run_scorecard_query(
+                cip_patterns=cip_patterns,
+                awlevels=selected_awlevels,
+                geo_key=geo_key,
+                geo_values=tuple(geo_values),
+            )
+
+        if df_sc.empty:
+            st.info(
+                "No graduate outcomes data available for these filters. "
+                "Scorecard data is reported at the 4-digit CIP level and may not "
+                "cover all institution / program combinations."
+            )
+        else:
+            # Deduplicate across distance modes (keep highest earnings per institution)
+            df_sc = (
+                df_sc
+                .sort_values("earn_mdn_4yr", ascending=False)
+                .drop_duplicates(subset=["unitid"], keep="first")
+            )
+
+            # ── Metrics row ───────────────────────────────────────────────
+            n_inst = df_sc["unitid"].nunique()
+            med_earn = df_sc["earn_mdn_4yr"].median()
+
+            _sc_debt = df_sc.dropna(subset=["debt_all_stgp_eval_mdn"])
+            med_debt = _sc_debt["debt_all_stgp_eval_mdn"].median() if not _sc_debt.empty else None
+
+            # Compute D/E from the displayed medians so the ratio is consistent
+            # with the earnings and debt metrics shown (ratio-of-medians, not
+            # median-of-ratios which can diverge due to Simpson's-paradox effects).
+            if med_earn and med_earn > 0 and med_debt is not None:
+                med_dte = med_debt / med_earn
+            else:
+                med_dte = None
+
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric(
+                "Median Earnings (4yr Post-Grad)",
+                f"${med_earn:,.0f}" if med_earn else "N/A",
+            )
+            sc2.metric(
+                "Median Debt at Completion",
+                f"${med_debt:,.0f}" if med_debt else "N/A",
+            )
+            sc3.metric(
+                "Median Debt-to-Earnings",
+                f"{med_dte:.2f}x" if med_dte else "N/A",
+            )
+            sc4.metric("Institutions with Data", f"{n_inst:,}")
+
+            # ── Detail table ──────────────────────────────────────────────
+            sc_display = df_sc.rename(columns={
+                "instnm": "Institution",
+                "city": "City",
+                "control_name": "Control",
+                "earn_mdn_4yr": "Median Earnings (4yr)",
+                "debt_all_stgp_eval_mdn": "Median Debt",
+                "debt_to_earnings": "Debt/Earnings",
+            })
+            sc_display = sc_display.sort_values(
+                "Debt/Earnings", ascending=True, na_position="last"
+            )
+            sc_display = sc_display[
+                ["Institution", "City", "Control",
+                 "Median Earnings (4yr)", "Median Debt", "Debt/Earnings"]
+            ].reset_index(drop=True)
+
+            # Check if any selected 6-digit CIPs share the same 4-digit prefix
+            # (Scorecard data is at 4-digit granularity)
+            if cip_patterns:
+                _sc_4digit = {p[:5] for p in cip_patterns if "%" not in p}
+                _sc_6digit = {p for p in cip_patterns if "%" not in p and len(p) > 5}
+                if len(_sc_6digit) > 0 and len(_sc_4digit) < len(_sc_6digit):
+                    st.caption(
+                        f":information_source: College Scorecard reports outcomes at the 4-digit CIP level "
+                        f"(e.g. {sorted(_sc_4digit)[0]}), so results may include related programs "
+                        f"that share the same prefix."
+                    )
+
+            st.caption(f"{len(sc_display):,} program–institution combinations with earnings data")
+
+            sc_col_cfg = {
+                "Institution": st.column_config.TextColumn("Institution", width=250),
+                "City": st.column_config.TextColumn("City", width=160),
+                "Control": st.column_config.TextColumn("Control", width=85),
+                "Median Earnings (4yr)": st.column_config.NumberColumn(
+                    "Median Earnings (4yr)", format="$%,.0f", width=155,
+                ),
+                "Median Debt": st.column_config.NumberColumn(
+                    "Median Debt", format="$%,.0f", width=120,
+                ),
+                "Debt/Earnings": st.column_config.NumberColumn(
+                    "Debt/Earnings", format="%.2fx", width=115,
+                ),
+            }
+
+            st.dataframe(
+                sc_display,
+                use_container_width=True,
+                hide_index=True,
+                column_config=sc_col_cfg,
+                height=min(len(sc_display) * 35 + 40, 600),
+            )
+
+
+    # ── By Institution ────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Completions by Institution")
+    st.caption(
+        "Annual completions per institution for the selected filters, "
+        "sorted by latest-year volume. "
+        "**Past Decade CAGR** = compound annual growth rate across the full "
+        "available data window (≈10 one-year intervals between bookend years). "
+        "**Post-COVID CAGR** = the same formula applied only to the three "
+        "most recent years (starting AY 2020-21, the first full pandemic "
+        "academic year), isolating current momentum from pre-pandemic trend. "
+        "Both use `(end / start)^(1/n) − 1`. Institutions with zero "
+        "completions in either bookend year show no CAGR. "
+        "| Source: NCES IPEDS Completions Survey."
+    )
+
+    if df_inst.empty:
+        st.info("No institution-level data for these filters.")
+    else:
+        # Get latest metadata per unitid (name may change across years)
+        meta = (
+            df_inst.sort_values("year")
+            .groupby("unitid")[["instnm", "city", "stabbr", "control_name"]]
+            .last()
+            .reset_index()
+        )
+
+        # Pivot on unitid only so name changes don't split rows
+        pivot = df_inst.pivot_table(
+            index="unitid",
+            columns="year",
+            values="completions",
+            aggfunc="sum",
+            fill_value=0,
+        ).reset_index()
+        pivot = pivot.merge(meta, on="unitid", how="left")
+        pivot.columns.name = None
+        yr_cols = sorted([c for c in pivot.columns if isinstance(c, int)])
+
+        # CAGR per institution (stored as %, e.g. 2.3 means 2.3%)
+        first_col, last_col = yr_cols[0], yr_cols[-1]
+        n_years = last_col - first_col
+        col_3ago = last_col - 3
+
+        def inst_cagr(row, start_col, n):
+            fv, lv = row[start_col], row[last_col]
+            if fv > 0 and lv > 0 and n > 0:
+                return ((lv / fv) ** (1 / n) - 1) * 100
+            return None
+
+        if col_3ago in yr_cols:
+            pivot["Post-COVID CAGR"] = pivot.apply(lambda r: inst_cagr(r, col_3ago, 3), axis=1)
+        pivot["Past Decade CAGR"] = pivot.apply(lambda r: inst_cagr(r, first_col, n_years), axis=1)
+        pivot = pivot.rename(columns={y: yr_label_short(y) for y in yr_cols})
+        last_yr_short = yr_label_short(last_col)
+        pivot = pivot.sort_values(last_yr_short, ascending=False, na_position="last").reset_index(drop=True)
+        control_map = {"Public": "Public", "Private nonprofit": "Private", "Private for-profit": "For-Profit"}
+        pivot["control_name"] = pivot["control_name"].map(control_map).fillna(pivot["control_name"])
+        pivot["city"] = pivot["city"] + ", " + pivot["stabbr"]
+        pivot = pivot.drop(columns=["unitid", "stabbr"])
+        pivot = pivot.rename(columns={"instnm": "Institution", "city": "City", "control_name": "Control"})
+        cagr_cols = [c for c in ["Post-COVID CAGR", "Past Decade CAGR"] if c in pivot.columns]
+        yr_short_labels = [yr_label_short(y) for y in yr_cols]
+        pivot = pivot[["Institution", "City", "Control"] + yr_short_labels + cagr_cols]
+
+        n_institutions = len(pivot)
+        st.caption(f"{n_institutions:,} institutions reported completions for these filters")
+
+        # Smaller font for the institution table
+        st.markdown(
+            "<style>div[data-testid='stDataFrame'] table {font-size: 0.78rem;}</style>",
+            unsafe_allow_html=True,
+        )
+
+        # Compute column widths so the table fits without horizontal scroll.
+        n_yr = len(yr_short_labels)
+        n_cagr = len(cagr_cols)
+        yr_col_w = 62
+        cagr_col_w = 72
+        control_col_w = 68
+        fixed_w = n_yr * yr_col_w + n_cagr * cagr_col_w + control_col_w
+        remaining = max(400, 1100 - fixed_w)
+        inst_w = int(remaining * 0.6)
+        city_w = remaining - inst_w
+
+        col_cfg = {
+            "Institution": st.column_config.TextColumn("Institution", width=inst_w),
+            "City": st.column_config.TextColumn("City", width=city_w),
+            "Control": st.column_config.TextColumn("Control", width=control_col_w),
+            **{
+                yr_label_short(y): st.column_config.NumberColumn(
+                    yr_label_short(y), format="%,d", width=yr_col_w,
+                )
+                for y in yr_cols
+            },
+        }
+        if "Post-COVID CAGR" in cagr_cols:
+            col_cfg["Post-COVID CAGR"] = st.column_config.NumberColumn(
+                f"Post-COVID CAGR ({yr_label_short(col_3ago)} → {yr_label_short(last_col)})",
+                format="%.1f%%",
+                width=cagr_col_w,
+            )
+        if "Past Decade CAGR" in cagr_cols:
+            col_cfg["Past Decade CAGR"] = st.column_config.NumberColumn(
+                f"Past Decade CAGR ({yr_label_short(first_col)} → {yr_label_short(last_col)})",
+                format="%.1f%%",
+                width=cagr_col_w,
+            )
+
+        st.dataframe(
+            pivot,
+            use_container_width=True,
+            hide_index=True,
+            column_config=col_cfg,
+        )
+
+    # ── Distance Education Programs ──────────────────────────────────────────
+    # Hidden from UI via SHOW_DISTANCE_EDUCATION_UI; backend retained.
+    if SHOW_DISTANCE_EDUCATION_UI:
+        st.divider()
+        st.subheader("Distance Education Programs")
+        if _windows.get("dep"):
+            _dep_min, _dep_max = _windows["dep"]
+            _dep_window = f"AY {_ay_label(_dep_min)} – AY {_ay_label(_dep_max)}"
+        else:
+            _dep_window = "available years"
+        st.caption(
+            "Counts of distinct programs offered (institution × CIP × award level) "
+            "and the share available via distance education. "
+            "**DE Programs (Any)** = programs that can be completed entirely or "
+            "partially via distance education (combines IPEDS DEP fields *DE* "
+            "and *DE_SOME*). 6-digit CIP summaries only — 2-digit rollup rows are "
+            "excluded to prevent double-counting. "
+            f"Coverage: {_dep_window}. "
+            "| Source: IPEDS Completions Distance-Education Programs (DEP) survey."
+        )
+
+        _dep_ok = False
+        try:
+            _dep_conn = get_conn()
+            _dep_conn.execute("SELECT 1 FROM completions_dep LIMIT 1")
+            _dep_conn.close()
+            _dep_ok = True
+        except Exception:
+            pass
+
+        if not _dep_ok:
+            st.info("Distance education program data not loaded.")
+        elif all_cips:
+            st.info(
+                "Distance education data is shown when specific CIP code(s) are "
+                "selected. Deselect **All CIP codes** and choose program(s)."
+            )
+        else:
+            with st.spinner("Querying distance education data..."):
+                df_dep = run_dep_query(
+                    cip_patterns=cip_patterns,
+                    awlevels=selected_awlevels,
+                    geo_key=geo_key,
+                    geo_values=tuple(geo_values),
+                )
+
+            if df_dep is None or df_dep.empty:
+                st.info("No distance education program data for these filters.")
+            else:
+                # ── Metrics ──────────────────────────────────────────────
+                _dep_latest = df_dep.iloc[-1]
+                _dep_earliest = df_dep.iloc[0]
+                _latest_yr = int(_dep_latest["year"])
+                _earliest_yr = int(_dep_earliest["year"])
+
+                _total_progs = int(_dep_latest["programs"])
+                _de_any = int(_dep_latest["programs_de_any"])
+                _pct_de = _dep_latest["pct_de_any"]
+
+                # Change in DE % over full period
+                _pct_de_first = _dep_earliest["pct_de_any"]
+                _pct_change = (
+                    _pct_de - _pct_de_first
+                    if pd.notna(_pct_de) and pd.notna(_pct_de_first) else None
+                )
+
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric(
+                    f"Programs Offered ({yr_label(_latest_yr)})",
+                    f"{_total_progs:,}",
+                )
+                d2.metric(
+                    "DE Programs (Any)",
+                    f"{_de_any:,}",
+                    help="Programs completable entirely or partially "
+                         "via distance education.",
+                )
+                d3.metric(
+                    "DE Share",
+                    f"{_pct_de:.1f}%",
+                )
+                d4.metric(
+                    f"DE Share Change ({yr_label(_earliest_yr)}-{yr_label(_latest_yr)})",
+                    f"{_pct_change:+.1f} pp" if _pct_change is not None else "N/A",
+                    help="Percentage point change in DE share over the period.",
+                )
+
+                # ── Dual-axis chart: programs (bars) + DE % (line) ───────
+                fig_dep = make_subplots(specs=[[{"secondary_y": True}]])
+
+                fig_dep.add_trace(go.Bar(
+                    x=df_dep["year"].apply(yr_label),
+                    y=df_dep["programs"],
+                    name="Total Programs",
+                    marker=dict(color="rgba(15, 134, 193, 0.25)"),
+                    hovertemplate="%{y:,} programs<extra></extra>",
+                ), secondary_y=False)
+
+                fig_dep.add_trace(go.Bar(
+                    x=df_dep["year"].apply(yr_label),
+                    y=df_dep["programs_de_any"],
+                    name="DE Programs (Any)",
+                    marker=dict(color="rgba(139, 92, 246, 0.6)"),
+                    hovertemplate="%{y:,} DE programs<extra></extra>",
+                ), secondary_y=False)
+
+                fig_dep.add_trace(go.Scatter(
+                    x=df_dep["year"].apply(yr_label),
+                    y=df_dep["pct_de_any"],
+                    name="DE Share %",
+                    mode="lines+markers",
+                    line=dict(width=2.5, color="#f26822"),
+                    marker=dict(size=6, color="#f26822"),
+                    hovertemplate="%{y:.1f}%<extra></extra>",
+                ), secondary_y=True)
+
+                fig_dep.update_yaxes(
+                    title_text="Programs Offered",
+                    showgrid=True, gridcolor="#F3F4F6", gridwidth=1,
+                    rangemode="tozero",
+                    secondary_y=False,
+                )
+                fig_dep.update_yaxes(
+                    title_text="DE Share (%)",
+                    showgrid=False,
+                    rangemode="tozero",
+                    ticksuffix="%",
+                    secondary_y=True,
+                )
+                fig_dep.update_layout(
+                    title=dict(
+                        text="<b>Distance Education Programs Over Time</b>",
+                        font=dict(size=15), x=0, xanchor="left",
+                    ),
+                    xaxis=dict(title="", showgrid=False),
+                    height=400,
+                    margin=dict(t=60, b=40, l=60, r=60),
+                    plot_bgcolor="white",
+                    paper_bgcolor="white",
+                    font=dict(
+                        family="Montserrat, Arial, sans-serif",
+                        size=12, color="#333333",
+                    ),
+                    barmode="overlay",
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="left", x=0, font=dict(size=11),
+                    ),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig_dep, use_container_width=True)
+
+                # ── DE Share by State (latest year) ──────────────────────
+                _dep_latest_yr = int(_dep_latest["year"])
+                _df_dep_states = run_dep_by_state_query(
+                    cip_patterns=cip_patterns,
+                    awlevels=selected_awlevels,
+                    year=_dep_latest_yr,
+                )
+                # Only show if we have at least 5 states reporting and >= 1 DE program
+                if (
+                    not _df_dep_states.empty
+                    and len(_df_dep_states) >= 5
+                    and _df_dep_states["programs_de_any"].sum() > 0
+                ):
+                    fig_dep_map = vi_choropleth(
+                        _df_dep_states["stabbr"],
+                        _df_dep_states["pct_de_any"],
+                        title=f"Distance-Education Share by State — {yr_label(_dep_latest_yr)}",
+                        colorbar_title="DE %",
+                        hover_format="{:.1f}%",
+                        hover_label="DE share",
+                    )
+                    st.plotly_chart(fig_dep_map, use_container_width=True)
+
+    # ── Job Posting Trends (Coresignal) ── hidden from UI; backend retained ──
+    # The Coresignal pipeline (queries, title resolution, geography mapping)
+    # stays loaded so it can be exercised by other code paths or re-enabled
+    # by flipping SHOW_JOB_POSTINGS_UI at the top of this file. None of the
+    # rendering below executes while the flag is False.
     try:
         _cs_api_key = st.secrets["coresignal"]["api_key"]
     except (KeyError, FileNotFoundError):
@@ -4160,20 +6146,25 @@ def main():
 
     _is_admin = st.user.is_logged_in and st.user.email and st.user.email.lower() == "brady.colby@validatedinsights.com"
 
-    if _cs_api_key and _is_admin:
+    if SHOW_JOB_POSTINGS_UI and _cs_api_key and _is_admin:
         st.divider()
         st.subheader("Job Posting Trends")
         st.caption(
-            "Monthly new job postings for occupations related to the selected program(s) "
-            "| Source: Coresignal Base Jobs API"
+            "Monthly counts of **newly created** job postings (not the running "
+            "total of active postings) for occupations linked to the selected "
+            "program(s). Postings are matched by occupation title — only "
+            "specific titles from the CIP-SOC crosswalk are queried; broad "
+            "catch-all titles (e.g. *Managers, All Other*) are excluded to "
+            "reduce noise. Live API call: data refreshes hourly. "
+            "| Source: Coresignal Base Jobs API."
         )
 
-    if _cs_api_key and _is_admin and all_cips:
+    if SHOW_JOB_POSTINGS_UI and _cs_api_key and _is_admin and all_cips:
         st.info(
             "Job posting data is shown when specific CIP code(s) are selected. "
             "Deselect **All CIP codes** and choose program(s) to see posting trends."
         )
-    elif _cs_api_key and _is_admin and not all_cips:
+    elif SHOW_JOB_POSTINGS_UI and _cs_api_key and _is_admin and not all_cips:
         _cs_key = f"cs_{cip_patterns}_{selected_awlevels}_{geo_key}_{geo_values}"
         if st.button("Pull Job Posting Trends", key="cs_pull"):
             with st.spinner("Querying job posting trends (this may take a moment)..."):
