@@ -82,22 +82,17 @@ st.set_page_config(
 )
 
 # ── Authentication gate ──────────────────────────────────────────────────────
-ALLOWED_DOMAIN = "validatedinsights.com"
+APP_PASSWORD = "VIDATAEXPLORER"
 
-if not st.user.is_logged_in:
+if not st.session_state.get("authenticated"):
     st.header("IPEDS Completions Explorer")
-    st.write("Please sign in with your @validatedinsights.com Google account.")
-    if st.button("🔐 Sign in with Google"):
-        st.login()
-    st.stop()
-
-if not st.user.email or not st.user.email.lower().endswith(f"@{ALLOWED_DOMAIN}"):
-    st.error(
-        f"Access restricted to @{ALLOWED_DOMAIN} accounts. "
-        f"You are signed in as {st.user.email}."
-    )
-    if st.button("Sign out"):
-        st.logout()
+    pw = st.text_input("Enter password", type="password")
+    if st.button("Sign in"):
+        if pw == APP_PASSWORD:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
     st.stop()
 
 # ── Reference data ────────────────────────────────────────────────────────────
@@ -6144,7 +6139,7 @@ def main():
     except (KeyError, FileNotFoundError):
         _cs_api_key = ""
 
-    _is_admin = st.user.is_logged_in and st.user.email and st.user.email.lower() == "brady.colby@validatedinsights.com"
+    _is_admin = True
 
     if SHOW_JOB_POSTINGS_UI and _cs_api_key and _is_admin:
         st.divider()
