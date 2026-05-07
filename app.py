@@ -3469,7 +3469,7 @@ def main():
 
     _windows = get_data_windows()
     with st.sidebar:
-        st.markdown("## 🎓 IPEDS Explorer")
+        st.image("https://id-preview--4a814ad5-bd22-4b23-b9ba-2a02d390cdaf.lovable.app/assets/vi-hub-logo-D4gQKMhd.png", use_container_width=True)
         if _windows.get("completions"):
             _yr_min, _yr_max = _windows["completions"]
             st.caption(
@@ -3631,6 +3631,7 @@ def main():
             selected_awlevels = tuple(sorted(awlevel_set))
 
     # ── Main area ─────────────────────────────────────────────────────────────
+    st.image("https://id-preview--4a814ad5-bd22-4b23-b9ba-2a02d390cdaf.lovable.app/assets/vi-hub-logo-D4gQKMhd.png", width=200)
     st.title("IPEDS Completions Trend Explorer")
     if _windows.get("completions"):
         _w_min, _w_max = _windows["completions"]
