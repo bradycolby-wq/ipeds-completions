@@ -85,6 +85,7 @@ st.set_page_config(
 APP_PASSWORD = "VIDATAEXPLORER"
 
 if not st.session_state.get("authenticated"):
+    st.image("https://id-preview--4a814ad5-bd22-4b23-b9ba-2a02d390cdaf.lovable.app/assets/vi-hub-logo-D4gQKMhd.png", width=200)
     st.header("IPEDS Completions Explorer")
     pw = st.text_input("Enter password", type="password")
     if st.button("Sign in"):
