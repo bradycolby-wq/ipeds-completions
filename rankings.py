@@ -859,20 +859,22 @@ def score_markets_for_program(
     pc_base_yr = 2021
     awlevel_ph = ",".join("?" * len(awlevels))
 
-    # Exclude exclusively-distance institutions from market-level
-    # completions so providers like Capella (MN), WGU (UT), Excelsior (NY)
-    # don't inflate their HQ state's "local grads" count.
-    # distance_ed_status.distnced = 1 marks an institution that operates
-    # entirely as a distance-education provider; this is narrower than
-    # distpgs (which would also kick out brick-and-mortar schools that
-    # happen to offer a single online track). The LEFT JOIN keeps any
-    # institution without a distance-ed row.
+    # Down-weight (not exclude) completions from exclusively-distance
+    # institutions. distance_ed_status.distnced = 1 marks an institution
+    # that operates entirely as a distance-education provider (Capella,
+    # WGU, Excelsior, etc.). Their grads are reported against the HQ
+    # state but a real share of those students live there too — they
+    # just aren't 100% local. Multiplying their ctotalt by 1/3 keeps a
+    # meaningful regional credit without letting an HQ skew the rank.
+    # Brick-and-mortar schools (including ones that offer a single online
+    # track, since distnced=2 for those) keep their full count.
     #
-    # Caveat: institutions like Chamberlain or Grand Canyon that run a
-    # massive online cohort alongside physical campuses still report all
-    # completions to their HQ state. distnced=1 won't catch them — we
-    # rely on the reduced completions-cluster weight to keep that
-    # remaining skew from dominating the score.
+    # Caveat: hybrid providers like Chamberlain or Grand Canyon (large
+    # online cohorts attached to physical campuses) carry distnced=2 and
+    # so don't get discounted. We rely on the reduced completions-cluster
+    # weight to keep the remaining skew from dominating the score.
+    DISTANCE_DISCOUNT = 1.0 / 3.0
+
     def _comp_by_market(year: int) -> pd.DataFrame:
         # If distance_ed_status doesn't have data for the requested year,
         # fall back to the most recent year that does (some early years
@@ -881,10 +883,14 @@ def score_markets_for_program(
             "SELECT MAX(year) FROM distance_ed_status WHERE year <= ?",
             (year,),
         ).fetchone()[0] or year
+        weighted_ctotalt = (
+            f"CASE WHEN d.distnced = 1 "
+            f"THEN c.ctotalt * {DISTANCE_DISCOUNT} ELSE c.ctotalt END"
+        )
         if market_grain == "state":
             sql = f"""
                 SELECT i.stabbr AS state_abbr,
-                       SUM(c.ctotalt) AS completions,
+                       SUM({weighted_ctotalt}) AS completions,
                        COUNT(DISTINCT CASE WHEN c.ctotalt > 0
                                            THEN c.unitid END) AS n_inst
                 FROM completions c
@@ -894,13 +900,12 @@ def score_markets_for_program(
                 WHERE c.year = ?
                   AND c.cipcode = ?
                   AND c.awlevel IN ({awlevel_ph})
-                  AND COALESCE(d.distnced, 2) <> 1
                 GROUP BY i.stabbr
             """
         else:
             sql = f"""
                 SELECT i.cbsa AS cbsa,
-                       SUM(c.ctotalt) AS completions,
+                       SUM({weighted_ctotalt}) AS completions,
                        COUNT(DISTINCT CASE WHEN c.ctotalt > 0
                                            THEN c.unitid END) AS n_inst
                 FROM completions c
@@ -911,7 +916,6 @@ def score_markets_for_program(
                   AND c.cipcode = ?
                   AND c.awlevel IN ({awlevel_ph})
                   AND i.cbsa IS NOT NULL
-                  AND COALESCE(d.distnced, 2) <> 1
                 GROUP BY i.cbsa
             """
         return pd.read_sql_query(
