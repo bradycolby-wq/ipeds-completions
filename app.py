@@ -3527,6 +3527,13 @@ def _render_rankings_page():
     else:
         # ── Top Markets by Program ───────────────────────────────────────────
         cip_options = load_cip_options()  # [("51.3801", "51.3801 - Registered Nursing"), ...]
+        # Hide catchall residual CIPs ("…, Other") from the picker — see
+        # rankings.score_programs_for_geo for the same exclusion. The
+        # pattern ", Other" with optional extra whitespace catches both the
+        # canonical NCES titles and a handful of double-space variants.
+        import re
+        _other_re = re.compile(r",\s*Other\s*$", re.IGNORECASE)
+        cip_options = [(c, lbl) for c, lbl in cip_options if not _other_re.search(lbl)]
         f1, f2 = st.columns([2.0, 1.0])
         with f1:
             cip_label = st.selectbox(

@@ -625,7 +625,7 @@ def score_programs_for_geo(
     # pick it up by the weight key. Keeping `completions` around for display.
     cip_agg["completions_volume"] = cip_agg["completions"]
 
-    # ── 11. Friendly CIP title
+    # ── 11. Friendly CIP title + exclude catchall ", Other" series codes
     cip_titles = pd.read_sql_query(
         f"SELECT cipcode, ciptitle FROM cip_taxonomy WHERE cipcode IN ({cip_ph})",
         conn,
@@ -633,6 +633,15 @@ def score_programs_for_geo(
     )
     title_map = dict(zip(cip_titles["cipcode"], cip_titles["ciptitle"]))
     cip_agg["cipdesc"] = cip_agg["cipcode"].apply(lambda c: title_map.get(c, c))
+    # Drop catchall residual codes like "Mathematics and Statistics, Other"
+    # or "Computer and Information Sciences,  Other" — they aggregate
+    # whatever doesn't fit into a sibling specialty code and aren't useful
+    # for demand ranking. Pattern: title ends with ", Other" (canonical),
+    # tolerating an extra whitespace which NCES occasionally emits.
+    _other_pat = r",\s*Other\s*$"
+    cip_agg = cip_agg[
+        ~cip_agg["cipdesc"].str.contains(_other_pat, case=False, regex=True, na=False)
+    ].reset_index(drop=True)
 
     # ── 12. Score, grade, rank
     # Log-transform raw volume metrics before z-scoring (counts span orders
