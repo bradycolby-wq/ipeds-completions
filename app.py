@@ -28,6 +28,8 @@ try:
 except ImportError:
     _HAS_STATSMODELS = False
 
+import rankings as _rankings  # Rankings/grading engine — see rankings.py
+
 # ── Config ────────────────────────────────────────────────────────────────────
 # Feature flag: hide the Job Posting Trends section from the UI. The Coresignal
 # backend (run_coresignal_trend, _resolve_coresignal_titles, etc. ~line 1290+)
@@ -3296,6 +3298,439 @@ def build_pdf_report(sheets_data, *, report_meta: dict) -> bytes:
     return buf.getvalue()
 
 
+# ── Rankings page ─────────────────────────────────────────────────────────────
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _rank_programs_cached(
+    geo_key: str,
+    geo_values: tuple,
+    awlevels: tuple,
+    cip_family: str | None,
+    min_completions: int,
+):
+    conn = get_conn()
+    try:
+        return _rankings.score_programs_for_geo(
+            conn=conn,
+            geo_key=geo_key,
+            geo_values=geo_values,
+            awlevels=awlevels,
+            stabbr_to_fips=STABBR_TO_FIPS,
+            cip_family=cip_family,
+            min_completions=min_completions,
+        )
+    finally:
+        conn.close()
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _rank_markets_cached(
+    cipcode: str,
+    awlevels: tuple,
+    market_grain: str,
+    top_n: int | None,
+    min_emp: int,
+):
+    conn = get_conn()
+    try:
+        return _rankings.score_markets_for_program(
+            conn=conn,
+            cipcode=cipcode,
+            awlevels=awlevels,
+            market_grain=market_grain,
+            stabbr_to_fips=STABBR_TO_FIPS,
+            fips_to_stabbr=FIPS_TO_STABBR,
+            excluded_states=EXCLUDED_TERRITORIES,
+            top_n=top_n,
+            min_emp=min_emp,
+        )
+    finally:
+        conn.close()
+
+
+def _grade_style(val) -> str:
+    """Pandas Styler callback — paint the Grade cell background by letter."""
+    if not val or pd.isna(val):
+        return ""
+    color = _rankings.GRADE_COLORS.get(val, "#666666")
+    return f"background-color: {color}; color: #ffffff; font-weight: 600;"
+
+
+def _render_rankings_page():
+    """Demand rankings — Top Programs by Market | Top Markets by Program."""
+    st.title("Demand Rankings")
+    st.caption(
+        "Scored, letter-graded leaderboards. Each composite score is built "
+        "from related-occupation employment volume + growth + projection, "
+        "weighted wages, Scorecard graduate earnings, Google Trends search "
+        "interest, and the LMI Institute automation-resilience score "
+        "(11 − risk). Components are z-scored within the cohort, weighted, "
+        "and converted to a 0-100 composite; letter grades reflect the "
+        "**percentile within the cohort**, not an absolute floor. "
+        "| Sources: BLS OES, BLS Employment Projections, NCES IPEDS, "
+        "U.S. Dept of Education College Scorecard, Google Trends, "
+        "LMI Institute Automation Exposure Index."
+    )
+
+    rank_mode = st.radio(
+        "Ranking type",
+        options=["Top Programs by Market", "Top Markets by Program"],
+        horizontal=True,
+        key="rank_mode",
+    )
+
+    # ── Award levels (shared by both modes) ─────────────────────────────────
+    level_label_to_code = {v: k for k, v in AWARD_LEVELS.items()}
+    level_options = list(AWARD_LEVELS.values())
+    if rank_mode == "Top Programs by Market":
+        # ── Inputs ──────────────────────────────────────────────────────────
+        f1, f2, f3 = st.columns([1.2, 1.0, 1.0])
+        with f1:
+            geo_type = st.radio(
+                "Geography",
+                options=["National", "By State", "By Metro Area"],
+                key="rank_geo_type",
+                horizontal=True,
+            )
+        with f2:
+            chosen_level = st.selectbox(
+                "Award level",
+                options=level_options,
+                index=level_options.index("Bachelor's degree"),
+                key="rank_awlevel",
+            )
+            awlevels = (level_label_to_code[chosen_level],)
+        with f3:
+            cip_taxonomy_2d = [
+                ("(All families)", None),
+                ("01 — Agriculture", "01"),
+                ("03 — Natural Resources", "03"),
+                ("04 — Architecture", "04"),
+                ("05 — Area, Ethnic, Cultural Studies", "05"),
+                ("09 — Communication, Journalism", "09"),
+                ("10 — Communications Technologies", "10"),
+                ("11 — Computer & Information Sciences", "11"),
+                ("12 — Personal & Culinary Services", "12"),
+                ("13 — Education", "13"),
+                ("14 — Engineering", "14"),
+                ("15 — Engineering Technologies", "15"),
+                ("16 — Foreign Languages", "16"),
+                ("19 — Family & Consumer Sciences", "19"),
+                ("22 — Legal Professions", "22"),
+                ("23 — English Language & Literature", "23"),
+                ("24 — Liberal Arts & Sciences", "24"),
+                ("25 — Library Science", "25"),
+                ("26 — Biological & Biomedical Sciences", "26"),
+                ("27 — Mathematics & Statistics", "27"),
+                ("29 — Military Technologies", "29"),
+                ("30 — Multi/Interdisciplinary Studies", "30"),
+                ("31 — Parks, Recreation, Fitness", "31"),
+                ("38 — Philosophy & Religious Studies", "38"),
+                ("39 — Theology & Religious Vocations", "39"),
+                ("40 — Physical Sciences", "40"),
+                ("41 — Science Technologies", "41"),
+                ("42 — Psychology", "42"),
+                ("43 — Homeland Security & Law Enforcement", "43"),
+                ("44 — Public Administration & Social Service", "44"),
+                ("45 — Social Sciences", "45"),
+                ("46 — Construction Trades", "46"),
+                ("47 — Mechanic & Repair Technologies", "47"),
+                ("48 — Precision Production", "48"),
+                ("49 — Transportation", "49"),
+                ("50 — Visual & Performing Arts", "50"),
+                ("51 — Health Professions", "51"),
+                ("52 — Business, Management, Marketing", "52"),
+                ("54 — History", "54"),
+            ]
+            fam_label = st.selectbox(
+                "CIP family (2-digit)",
+                options=[lbl for lbl, _ in cip_taxonomy_2d],
+                index=0,
+                key="rank_cip_family",
+                help=(
+                    "Limit the ranking to a single CIP family so the cohort "
+                    "is apples-to-apples. Leave on '(All families)' to rank "
+                    "every program at this award level together."
+                ),
+            )
+            cip_family = next(code for lbl, code in cip_taxonomy_2d if lbl == fam_label)
+
+        # Geography multi-select
+        g_geo_values: tuple = ()
+        g_geo_key = "national"
+        if geo_type == "By State":
+            sts = load_states()
+            sel = st.multiselect(
+                "State(s)", options=sts, key="rank_state_pick",
+                placeholder="Select one or more states…",
+            )
+            if not sel:
+                st.info("Select at least one state to rank programs.")
+                return
+            g_geo_values = tuple(sel)
+            g_geo_key = "state"
+        elif geo_type == "By Metro Area":
+            cbsas = load_cbsas()
+            label_to_code = {label: code for code, label in cbsas}
+            sel_labels = st.multiselect(
+                "Metro area(s)",
+                options=[label for _, label in cbsas],
+                key="rank_metro_pick",
+                placeholder="Search metro areas…",
+            )
+            if not sel_labels:
+                st.info("Select at least one metro area to rank programs.")
+                return
+            g_geo_values = tuple(label_to_code[l] for l in sel_labels)
+            g_geo_key = "metro"
+
+        min_comp = st.slider(
+            "Minimum completions threshold (latest year)",
+            min_value=0, max_value=500, value=25, step=5,
+            key="rank_min_comp",
+            help=(
+                "Programs below this threshold of total completions in the "
+                "selected geography are excluded from the cohort. Higher = "
+                "fewer niche / data-sparse programs."
+            ),
+        )
+
+        if not st.button("Run rankings", type="primary", key="rank_run_btn"):
+            st.caption(
+                "Choose your geography, award level, and an optional CIP family, "
+                "then hit **Run rankings**."
+            )
+            return
+
+        with st.spinner("Scoring programs…"):
+            df = _rank_programs_cached(
+                geo_key=g_geo_key,
+                geo_values=g_geo_values,
+                awlevels=awlevels,
+                cip_family=cip_family,
+                min_completions=min_comp,
+            )
+        if df is None or df.empty:
+            st.warning(
+                "No programs met the criteria. Try lowering the completions "
+                "threshold or selecting a different CIP family."
+            )
+            return
+
+        _render_rank_table_programs(df)
+    else:
+        # ── Top Markets by Program ───────────────────────────────────────────
+        cip_options = load_cip_options()  # [("51.3801", "51.3801 - Registered Nursing"), ...]
+        f1, f2 = st.columns([2.0, 1.0])
+        with f1:
+            cip_label = st.selectbox(
+                "Program (CIP code)",
+                options=[label for _, label in cip_options],
+                key="rank_cip_pick",
+            )
+            cipcode = next(code for code, label in cip_options if label == cip_label)
+        with f2:
+            chosen_level = st.selectbox(
+                "Award level",
+                options=level_options,
+                index=level_options.index("Bachelor's degree"),
+                key="rank_market_awlevel",
+            )
+            awlevels = (level_label_to_code[chosen_level],)
+        f3, f4 = st.columns([1.0, 1.0])
+        with f3:
+            grain = st.radio(
+                "Market grain",
+                options=["State", "Metro"],
+                horizontal=True,
+                key="rank_market_grain",
+            )
+        with f4:
+            top_n = st.slider(
+                "Show top N markets",
+                min_value=10, max_value=200, value=25, step=5,
+                key="rank_topn",
+            )
+
+        if not st.button("Run rankings", type="primary", key="rank_market_run"):
+            st.caption(
+                "Pick a CIP, award level, and grain (state vs. metro), then "
+                "hit **Run rankings**."
+            )
+            return
+
+        market_grain = "state" if grain == "State" else "metro"
+        with st.spinner("Scoring markets…"):
+            df = _rank_markets_cached(
+                cipcode=cipcode,
+                awlevels=awlevels,
+                market_grain=market_grain,
+                top_n=top_n,
+                min_emp=100 if market_grain == "metro" else 0,
+            )
+        if df is None or df.empty:
+            st.warning(
+                "No markets met the criteria. Try the other grain (state vs. "
+                "metro) or a different program."
+            )
+            return
+
+        _render_rank_table_markets(df, market_grain=market_grain, program_label=cip_label)
+
+
+def _fmt_pct(v):
+    if pd.isna(v):
+        return "—"
+    return f"{v * 100:+.1f}%"
+
+
+def _fmt_money(v):
+    if pd.isna(v):
+        return "—"
+    return f"${v:,.0f}"
+
+
+def _fmt_int(v):
+    if pd.isna(v):
+        return "—"
+    return f"{v:,.0f}"
+
+
+def _fmt_num(v, places=1):
+    if pd.isna(v):
+        return "—"
+    return f"{v:.{places}f}"
+
+
+def _render_rank_table_programs(df: pd.DataFrame):
+    """Format and display the per-program ranking dataframe.
+
+    We pre-format every numeric column to a string because Streamlit's
+    st.dataframe ignores pandas Styler.format(). Cell *styling* (the
+    coloured Grade pill) still goes through Styler.map(), which IS
+    honored.
+    """
+    display = pd.DataFrame({
+        "Rank":            df["rank"],
+        "Grade":           df["grade"],
+        "Score":           df["composite"].apply(lambda v: _fmt_num(v, 1)),
+        "CIP":             df["cipcode"],
+        "Program":         df["cipdesc"],
+        "Completions":     df["completions"].apply(_fmt_int),
+        "Related Emp.":    df["emp_volume"].apply(_fmt_int),
+        "Past 5y CAGR":    df["emp_growth"].apply(_fmt_pct),
+        "Projected CAGR":  df["emp_projection"].apply(_fmt_pct),
+        "Median Wage":     df["wage"].apply(_fmt_money),
+        "Grad Earnings":   df["earnings"].apply(_fmt_money)
+                            if "earnings" in df.columns else "—",
+        "Search Interest": df["search_interest"].apply(lambda v: _fmt_num(v, 1))
+                            if "search_interest" in df.columns else "—",
+        "Auto Risk":       df["automation_risk"].apply(lambda v: _fmt_num(v, 1))
+                            if "automation_risk" in df.columns else "—",
+    })
+
+    st.subheader(f"Ranked programs · {len(display):,} in cohort")
+    st.caption(
+        "Grades are by percentile within this cohort: top 5% = A+, 5-15% = A, "
+        "15-25% = A-, 25-35% = B+, 35-45% = B, 45-55% = B-, 55-65% = C+, "
+        "65-75% = C, 75-85% = C-, 85-95% = D, bottom 5% = F. The "
+        "**Score** column drives the rank."
+    )
+    styled = display.style.map(_grade_style, subset=["Grade"])
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        hide_index=True,
+        height=min(700, 60 + 36 * min(len(display), 18)),
+    )
+
+    st.download_button(
+        "Download CSV",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name="program_rankings.csv",
+        mime="text/csv",
+        key="rank_dl_programs",
+    )
+
+    # Component-weight footnote
+    with st.expander("How the score is calculated"):
+        st.markdown(
+            "Component weights for the composite score (each component is "
+            "z-scored within the cohort and the weighted sum is shifted/scaled "
+            "to a roughly 0-100 composite):\n\n"
+            + "\n".join(
+                f"- **{k}**: {int(v*100)}%"
+                for k, v in _rankings.PROGRAM_WEIGHTS.items()
+            )
+            + "\n\nEmployment volume is log-transformed before z-scoring "
+            "because counts span several orders of magnitude. Automation "
+            "resilience = 11 − the LMI Institute automation-exposure score "
+            "(so a higher value = harder to automate)."
+        )
+
+
+def _render_rank_table_markets(df: pd.DataFrame, market_grain: str, program_label: str):
+    """Format and display the per-market ranking dataframe."""
+    display = pd.DataFrame({
+        "Rank":            df["rank"],
+        "Grade":           df["grade"],
+        "Score":           df["composite"].apply(lambda v: _fmt_num(v, 1)),
+        "Market":          df["area_label"],
+        "Related Emp.":    df["emp_volume"].apply(_fmt_int),
+        "LQ":              df["location_quotient"].apply(lambda v: _fmt_num(v, 2))
+                            if "location_quotient" in df.columns else "—",
+        "Past 5y CAGR":    df["emp_growth"].apply(_fmt_pct),
+        "Projected CAGR":  df["emp_projection"].apply(_fmt_pct),
+        "Median Wage":     df["wage"].apply(_fmt_money),
+        "Search Interest": df["search_interest"].apply(lambda v: _fmt_num(v, 1))
+                            if "search_interest" in df.columns else "—",
+        "Local Grads":     df["completions"].apply(_fmt_int)
+                            if "completions" in df.columns else "—",
+        "Emp / Grad+1":    df["competition_inv"].apply(lambda v: _fmt_num(v, 1))
+                            if "competition_inv" in df.columns else "—",
+    })
+
+    st.subheader(
+        f"Ranked {market_grain}s · {program_label}"
+    )
+    st.caption(
+        "**LQ** = location quotient (1.0 = same employment share as the "
+        "nation; >1.0 = over-indexed). **Emp / Grad+1** is a crude opportunity "
+        "score — high values mean lots of jobs relative to local grad supply. "
+        "Grades reflect the percentile within this market grain (every state, "
+        "or every metro that has at least 100 related jobs)."
+    )
+    styled = display.style.map(_grade_style, subset=["Grade"])
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        hide_index=True,
+        height=min(700, 60 + 36 * min(len(display), 18)),
+    )
+
+    st.download_button(
+        "Download CSV",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name=f"market_rankings_{market_grain}.csv",
+        mime="text/csv",
+        key="rank_dl_markets",
+    )
+
+    with st.expander("How the score is calculated"):
+        st.markdown(
+            "Component weights for the market composite score:\n\n"
+            + "\n".join(
+                f"- **{k}**: {int(v*100)}%"
+                for k, v in _rankings.MARKET_WEIGHTS.items()
+            )
+            + "\n\nEmployment volume is log-transformed before z-scoring. "
+            "Location quotient compares the market's share of program-related "
+            "employment to the national share. Metro-level Google Trends data "
+            "isn't published, so search interest is omitted in metro mode."
+        )
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 def main():
     # One-time DB prep
@@ -3542,6 +3977,20 @@ def main():
         except Exception:
             st.caption("DB: unknown")
 
+        st.divider()
+        view_mode = st.radio(
+            "View",
+            options=["Explore", "Rankings"],
+            index=0,
+            key="view_mode",
+            help=(
+                "Explore: deep-dive trend charts for one program + geography. "
+                "Rankings: scored, letter-graded leaderboards — either top "
+                "programs for a chosen market, or top markets for a chosen "
+                "program."
+            ),
+        )
+
         # Quick-select presets
         preset_names = ["— Select a program —"] + list(PROGRAM_PRESETS.keys())
         chosen_preset = st.selectbox(
@@ -3684,6 +4133,13 @@ def main():
 
     # ── Main area ─────────────────────────────────────────────────────────────
     st.image("vi-logo.png", width=200)
+
+    # When the user picked the Rankings view, render that page and short-circuit
+    # everything below. The Explore page sees its existing flow unchanged.
+    if view_mode == "Rankings":
+        _render_rankings_page()
+        return
+
     st.title("IPEDS Completions Trend Explorer")
     if _windows.get("completions"):
         _w_min, _w_max = _windows["completions"]
