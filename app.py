@@ -3525,21 +3525,10 @@ def main():
     _windows = get_data_windows()
     with st.sidebar:
         st.image("vi-logo.png", use_container_width=True)
-        if _windows.get("completions"):
-            _yr_min, _yr_max = _windows["completions"]
-            st.caption(
-                f"Completions data: AY {_ay_label(_yr_min)} → AY {_ay_label(_yr_max)} "
-                f"({_yr_max - _yr_min + 1} years)"
-            )
-        else:
-            st.caption("Completions data window unavailable")
 
         # DB version diagnostic (small caption at top of sidebar)
         try:
             _diag_conn = get_conn()
-            _diag_vol = _diag_conn.execute(
-                "SELECT COUNT(*) FROM search_volume_calibration"
-            ).fetchone()[0]
             # Detect DB version by feature presence (best-effort, fail-soft)
             try:
                 _has_auto = _diag_conn.execute(
@@ -3549,9 +3538,9 @@ def main():
                 _has_auto = False
             _diag_conn.close()
             _db_ver = "v1.7" if _has_auto else "v1.6"
-            st.caption(f"DB: {_db_ver} | Volume cal: {_diag_vol} keywords")
+            st.caption(f"DB: {_db_ver}")
         except Exception:
-            st.caption("DB: pre-v1.5 (no volume calibration)")
+            st.caption("DB: unknown")
 
         # Quick-select presets
         preset_names = ["— Select a program —"] + list(PROGRAM_PRESETS.keys())
