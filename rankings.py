@@ -162,22 +162,30 @@ PROGRAM_WEIGHTS = {
 }
 
 # In markets mode, "completions" means local grad supply for the chosen
-# program. We treat the count and the trend as positive demand signals
-# (institutions only sustain a program if students show up) while keeping
-# competition_inv as a separate opportunity-gap metric.
+# program — but IPEDS attributes online students to the institution's
+# HQ state, so Capella (MN), Chamberlain (IL), WGU (UT), etc. heavily
+# skew the geographic distribution. We address that two ways:
+#
+#   1. Exclude institutions with `distpgs = 1` ("All programs are
+#      offered as distance education") from market-level completions
+#      metrics. See score_markets_for_program.
+#   2. Use lighter weights on completions volume / trend than the
+#      programs view does, so location quotient and BLS employment
+#      data (which DO reflect where the work actually happens) carry
+#      more of the score.
 MARKET_WEIGHTS = {
-    "emp_volume":                0.15,
-    "completions_volume":        0.12,   # local grads in latest year
-    "completions_long_trend":    0.10,   # 10y CAGR of local grads
-    "completions_pc_trend":      0.10,   # 3y post-COVID CAGR of local grads
-    "location_quotient":         0.10,
-    "emp_growth":                0.08,
-    "emp_projection":            0.10,
-    "wage":                      0.08,
-    "search_interest":           0.04,
-    "search_trend":              0.04,
-    "avg_program_size":          0.04,
-    "competition_inv":           0.05,
+    "emp_volume":                0.20,
+    "location_quotient":         0.15,
+    "emp_projection":            0.12,
+    "emp_growth":                0.10,
+    "wage":                      0.10,
+    "completions_volume":        0.05,   # local grads, dist-only providers excluded
+    "completions_long_trend":    0.06,
+    "completions_pc_trend":      0.06,
+    "search_interest":           0.05,
+    "search_trend":              0.05,
+    "avg_program_size":          0.03,
+    "competition_inv":           0.03,
 }
 
 
@@ -851,7 +859,28 @@ def score_markets_for_program(
     pc_base_yr = 2021
     awlevel_ph = ",".join("?" * len(awlevels))
 
+    # Exclude exclusively-distance institutions from market-level
+    # completions so providers like Capella (MN), WGU (UT), Excelsior (NY)
+    # don't inflate their HQ state's "local grads" count.
+    # distance_ed_status.distnced = 1 marks an institution that operates
+    # entirely as a distance-education provider; this is narrower than
+    # distpgs (which would also kick out brick-and-mortar schools that
+    # happen to offer a single online track). The LEFT JOIN keeps any
+    # institution without a distance-ed row.
+    #
+    # Caveat: institutions like Chamberlain or Grand Canyon that run a
+    # massive online cohort alongside physical campuses still report all
+    # completions to their HQ state. distnced=1 won't catch them — we
+    # rely on the reduced completions-cluster weight to keep that
+    # remaining skew from dominating the score.
     def _comp_by_market(year: int) -> pd.DataFrame:
+        # If distance_ed_status doesn't have data for the requested year,
+        # fall back to the most recent year that does (some early years
+        # lack distance flags).
+        dist_year = conn.execute(
+            "SELECT MAX(year) FROM distance_ed_status WHERE year <= ?",
+            (year,),
+        ).fetchone()[0] or year
         if market_grain == "state":
             sql = f"""
                 SELECT i.stabbr AS state_abbr,
@@ -860,9 +889,12 @@ def score_markets_for_program(
                                            THEN c.unitid END) AS n_inst
                 FROM completions c
                 JOIN institutions i ON i.unitid = c.unitid AND i.year = c.year
+                LEFT JOIN distance_ed_status d
+                       ON d.unitid = c.unitid AND d.year = ?
                 WHERE c.year = ?
                   AND c.cipcode = ?
                   AND c.awlevel IN ({awlevel_ph})
+                  AND COALESCE(d.distnced, 2) <> 1
                 GROUP BY i.stabbr
             """
         else:
@@ -873,14 +905,17 @@ def score_markets_for_program(
                                            THEN c.unitid END) AS n_inst
                 FROM completions c
                 JOIN institutions i ON i.unitid = c.unitid AND i.year = c.year
+                LEFT JOIN distance_ed_status d
+                       ON d.unitid = c.unitid AND d.year = ?
                 WHERE c.year = ?
                   AND c.cipcode = ?
                   AND c.awlevel IN ({awlevel_ph})
                   AND i.cbsa IS NOT NULL
+                  AND COALESCE(d.distnced, 2) <> 1
                 GROUP BY i.cbsa
             """
         return pd.read_sql_query(
-            sql, conn, params=[year, cipcode] + list(awlevels),
+            sql, conn, params=[dist_year, year, cipcode] + list(awlevels),
         )
 
     comp_latest = _comp_by_market(latest_comp_yr).rename(
