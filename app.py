@@ -2262,6 +2262,60 @@ def run_employment_query(
     return result.sort_values(["occ_code", "year"]).reset_index(drop=True)
 
 
+# ── Automation risk lookup ───────────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_automation_risk(soc_codes: tuple) -> pd.DataFrame:
+    """Return LMII automation risk scores for the given SOC codes.
+
+    Source: LMI Institute Automation Exposure Index (2019 OES). Each row
+    scores an occupation 1-10, where 1 = least exposed to automation and
+    10 = most exposed. SOC 2010 codes are bridged through soc_2010_to_2018
+    so older OES years still resolve.
+
+    Returns DataFrame: occ_code, risk_score, composite. Empty when the
+    table is absent (e.g. loader hasn't run).
+    """
+    if not soc_codes:
+        return pd.DataFrame(columns=["occ_code", "risk_score", "composite"])
+
+    conn = get_conn()
+    try:
+        conn.execute("SELECT 1 FROM occ_automation_risk LIMIT 1")
+    except Exception:
+        conn.close()
+        return pd.DataFrame(columns=["occ_code", "risk_score", "composite"])
+
+    # Direct match on the provided code, OR bridge through SOC 2010→2018
+    # so that older OES rows (which use SOC 2010 codes) still find a score.
+    sql = f"""
+        WITH wanted(code) AS (
+            VALUES {",".join(f"(?)" for _ in soc_codes)}
+        )
+        SELECT w.code AS occ_code,
+               COALESCE(r_direct.risk_score, r_bridged.risk_score) AS risk_score,
+               COALESCE(r_direct.composite,  r_bridged.composite)  AS composite
+        FROM wanted w
+        LEFT JOIN occ_automation_risk r_direct
+               ON r_direct.occ_code = w.code
+        LEFT JOIN soc_2010_to_2018 x
+               ON x.soc_2010 = w.code
+        LEFT JOIN occ_automation_risk r_bridged
+               ON r_bridged.occ_code = x.soc_2018
+    """
+    df = pd.read_sql_query(sql, conn, params=list(soc_codes))
+    conn.close()
+
+    # If SOC 2010 maps to multiple 2018 codes, the JOIN yields duplicates —
+    # keep the highest risk match for the same input SOC (conservative).
+    df = (
+        df.dropna(subset=["risk_score"])
+          .sort_values("risk_score", ascending=False)
+          .drop_duplicates(subset=["occ_code"], keep="first")
+    )
+    return df.reset_index(drop=True)
+
+
 # ── College Scorecard query ──────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -3927,13 +3981,27 @@ def main():
                 if not _emp_df.empty:
                     _latest_yr = _emp_df["year"].max()
                     _emp_latest = _emp_df[_emp_df["year"] == _latest_yr].copy()
+                    # Bolt on the LMII automation risk score per occupation
+                    _emp_risk = get_automation_risk(
+                        tuple(_emp_latest["occ_code"].unique())
+                    )
+                    if not _emp_risk.empty:
+                        _emp_latest = _emp_latest.merge(
+                            _emp_risk[["occ_code", "risk_score"]],
+                            on="occ_code",
+                            how="left",
+                        )
                     emp_export = _emp_latest.rename(columns={
                         "occ_code": "SOC Code",
                         "occ_title": "Occupation",
                         "tot_emp": "Total Employment",
                         "a_median": "Median Annual Wage",
+                        "risk_score": "Automation Risk (1-10)",
                     })
-                    cols = [c for c in ["SOC Code", "Occupation", "Total Employment", "Median Annual Wage"] if c in emp_export.columns]
+                    cols = [c for c in [
+                        "SOC Code", "Occupation", "Total Employment",
+                        "Median Annual Wage", "Automation Risk (1-10)",
+                    ] if c in emp_export.columns]
                     emp_export = emp_export[cols].sort_values("Total Employment", ascending=False).reset_index(drop=True)
                     sheets.append(("Employment", emp_export, {
                         "num_cols": ["Total Employment"],
@@ -5249,9 +5317,14 @@ def main():
         "remapped to their primary detail code. **Projected CAGR** is the "
         "weighted-average BLS Employment Projections growth rate (current → "
         "+10 yr) across the matched occupations, weighted by latest-year "
-        f"employment. Coverage: {_oes_window}. "
+        f"employment. **Automation Risk** is the LMI Institute Automation "
+        "Exposure Index (2019 OES vintage), a 1–10 score derived from O*NET "
+        "ability, work-activity, and work-context attributes; 1 = least "
+        "exposed, 10 = most exposed. The aggregate shown is weighted by "
+        f"latest-year employment. Coverage: {_oes_window}. "
         "| Sources: BLS Occupational Employment & Wage Statistics (OEWS), "
-        "BLS Employment Projections, NCES CIP-to-SOC Crosswalk."
+        "BLS Employment Projections, NCES CIP-to-SOC Crosswalk, "
+        "LMI Institute Automation Exposure Index (2019 OES)."
     )
 
     if all_cips:
@@ -5344,7 +5417,29 @@ def main():
                         if emp_3ago_val > 0:
                             emp_3yr_cagr = (emp_latest / emp_3ago_val) ** (1 / 3) - 1
 
-                    em1, em2, em3, em4, em5 = st.columns(5)
+                    # Employment-weighted automation risk (LMII 2019 OES index, 1-10)
+                    df_risk = get_automation_risk(
+                        tuple(df_emp["occ_code"].unique())
+                    )
+                    emp_weighted_risk = None
+                    risk_coverage = 0.0
+                    if not df_risk.empty:
+                        latest_with_risk = (
+                            latest_wages[["occ_code", "tot_emp"]]
+                            .merge(df_risk, on="occ_code", how="left")
+                            .dropna(subset=["risk_score"])
+                        )
+                        if not latest_with_risk.empty and latest_with_risk["tot_emp"].sum() > 0:
+                            emp_weighted_risk = (
+                                (latest_with_risk["risk_score"] * latest_with_risk["tot_emp"]).sum()
+                                / latest_with_risk["tot_emp"].sum()
+                            )
+                            risk_coverage = (
+                                latest_with_risk["tot_emp"].sum()
+                                / latest_wages["tot_emp"].sum()
+                            )
+
+                    em1, em2, em3, em4, em5, em6 = st.columns(6)
                     em1.metric(
                         f"{latest_emp_year} Related Employment",
                         f"{emp_latest:,}",
@@ -5365,6 +5460,31 @@ def main():
                         f"Wtd. Median Wage ({latest_emp_year})",
                         f"${avg_median_wage:,}" if avg_median_wage else "N/A",
                     )
+                    if emp_weighted_risk is not None:
+                        em6.metric(
+                            "Automation Risk (1–10)",
+                            f"{emp_weighted_risk:.1f}",
+                            help=(
+                                "Employment-weighted LMI Institute Automation "
+                                "Exposure Index across the related occupations. "
+                                "1 = least exposed, 10 = most exposed. The score "
+                                "ranks each occupation by its mix of O*NET "
+                                "abilities, work activities, and work contexts "
+                                "(routine/manual tasks score higher; abstract, "
+                                "cognitive, and interpersonal tasks score lower). "
+                                "**Not predictive** — a high score means the "
+                                "task content is theoretically automatable, not "
+                                "that workers are at imminent risk; cost, "
+                                "policy, public acceptance, and workforce "
+                                "factors all moderate real-world adoption. "
+                                f"Covers {risk_coverage:.0%} of latest-year "
+                                "related employment. Source: LMI Institute, "
+                                "Automation Exposure Index (2019 OES vintage, "
+                                "lmiontheweb.org)."
+                            ),
+                        )
+                    else:
+                        em6.metric("Automation Risk (1–10)", "N/A")
 
                 # Line chart: aggregated employment across all related occupations
                 if not emp_by_year.empty:
@@ -5691,13 +5811,173 @@ def main():
                     .drop_duplicates("occ_code")
                     .sort_values("occ_code")
                 )
+                # Attach automation risk (1-10) per occupation when available
+                occ_list = occ_list.merge(
+                    get_automation_risk(tuple(occ_list["occ_code"])),
+                    on="occ_code",
+                    how="left",
+                )
+
+                def _risk_tag(score):
+                    if pd.isna(score):
+                        return ""
+                    s = int(score)
+                    return f" · automation risk **{s}/10**"
+
                 occ_bullets = "  \n".join(
-                    f"- **{row.occ_code}** {row.occ_title}" for row in occ_list.itertuples()
+                    f"- **{row.occ_code}** {row.occ_title}{_risk_tag(row.risk_score)}"
+                    for row in occ_list.itertuples()
                 )
                 st.caption(
                     f"Aggregate includes **{len(occ_list)}** related occupations "
-                    f"(SOC codes mapped via CIP-SOC crosswalk):  \n{occ_bullets}"
+                    f"(SOC codes mapped via CIP-SOC crosswalk · automation risk "
+                    f"per LMI Institute 2019 OES Automation Exposure Index, "
+                    f"1 = low / 10 = high):  \n{occ_bullets}"
                 )
+                # Automation-risk methodology footnote
+                _risk_n = occ_list["risk_score"].notna().sum()
+                if _risk_n > 0:
+                    st.caption(
+                        ":information_source: **About the automation-risk score.** "
+                        "The LMI Institute Automation Exposure Index ranks each "
+                        "occupation on a 1–10 scale (1 = least exposed, 10 = "
+                        "most exposed) using O*NET data on abilities, work "
+                        "activities, and work contexts. Tasks that are routine "
+                        "or manual score higher; tasks that are abstract, "
+                        "cognitive, or interpersonal (e.g. empathy, creativity, "
+                        "judgment) score lower. The index is built on the 2019 "
+                        "OES occupational structure, so a small number of newer "
+                        "BLS combined or split SOC codes have no score and are "
+                        "omitted from the bullet list above. "
+                        "**The score is not predictive.** A high score means "
+                        "the task content is theoretically automatable, not "
+                        "that workers are in imminent danger of displacement — "
+                        "cost and complexity, policy and regulation, public "
+                        "acceptance, and workforce dynamics all moderate "
+                        "real-world adoption, and in many occupations "
+                        "automation increases productivity rather than "
+                        "eliminating jobs. "
+                        "| Source: LMI Institute, Automation Exposure Index "
+                        "(2019 OES vintage), [lmiontheweb.org]"
+                        "(https://www.lmiontheweb.org)."
+                    )
+
+
+    # ── By Institution ────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Completions by Institution")
+    st.caption(
+        "Annual completions per institution for the selected filters, "
+        "sorted by latest-year volume. "
+        "**Past Decade CAGR** = compound annual growth rate across the full "
+        "available data window (≈10 one-year intervals between bookend years). "
+        "**Post-COVID CAGR** = the same formula applied only to the three "
+        "most recent years (starting AY 2020-21, the first full pandemic "
+        "academic year), isolating current momentum from pre-pandemic trend. "
+        "Both use `(end / start)^(1/n) − 1`. Institutions with zero "
+        "completions in either bookend year show no CAGR. "
+        "| Source: NCES IPEDS Completions Survey."
+    )
+
+    if df_inst.empty:
+        st.info("No institution-level data for these filters.")
+    else:
+        # Get latest metadata per unitid (name may change across years)
+        meta = (
+            df_inst.sort_values("year")
+            .groupby("unitid")[["instnm", "city", "stabbr", "control_name"]]
+            .last()
+            .reset_index()
+        )
+
+        # Pivot on unitid only so name changes don't split rows
+        pivot = df_inst.pivot_table(
+            index="unitid",
+            columns="year",
+            values="completions",
+            aggfunc="sum",
+            fill_value=0,
+        ).reset_index()
+        pivot = pivot.merge(meta, on="unitid", how="left")
+        pivot.columns.name = None
+        yr_cols = sorted([c for c in pivot.columns if isinstance(c, int)])
+
+        # CAGR per institution (stored as %, e.g. 2.3 means 2.3%)
+        first_col, last_col = yr_cols[0], yr_cols[-1]
+        n_years = last_col - first_col
+        col_3ago = last_col - 3
+
+        def inst_cagr(row, start_col, n):
+            fv, lv = row[start_col], row[last_col]
+            if fv > 0 and lv > 0 and n > 0:
+                return ((lv / fv) ** (1 / n) - 1) * 100
+            return None
+
+        if col_3ago in yr_cols:
+            pivot["Post-COVID CAGR"] = pivot.apply(lambda r: inst_cagr(r, col_3ago, 3), axis=1)
+        pivot["Past Decade CAGR"] = pivot.apply(lambda r: inst_cagr(r, first_col, n_years), axis=1)
+        pivot = pivot.rename(columns={y: yr_label_short(y) for y in yr_cols})
+        last_yr_short = yr_label_short(last_col)
+        pivot = pivot.sort_values(last_yr_short, ascending=False, na_position="last").reset_index(drop=True)
+        control_map = {"Public": "Public", "Private nonprofit": "Private", "Private for-profit": "For-Profit"}
+        pivot["control_name"] = pivot["control_name"].map(control_map).fillna(pivot["control_name"])
+        pivot["city"] = pivot["city"] + ", " + pivot["stabbr"]
+        pivot = pivot.drop(columns=["unitid", "stabbr"])
+        pivot = pivot.rename(columns={"instnm": "Institution", "city": "City", "control_name": "Control"})
+        cagr_cols = [c for c in ["Post-COVID CAGR", "Past Decade CAGR"] if c in pivot.columns]
+        yr_short_labels = [yr_label_short(y) for y in yr_cols]
+        pivot = pivot[["Institution", "City", "Control"] + yr_short_labels + cagr_cols]
+
+        n_institutions = len(pivot)
+        st.caption(f"{n_institutions:,} institutions reported completions for these filters")
+
+        # Smaller font for the institution table
+        st.markdown(
+            "<style>div[data-testid='stDataFrame'] table {font-size: 0.78rem;}</style>",
+            unsafe_allow_html=True,
+        )
+
+        # Compute column widths so the table fits without horizontal scroll.
+        n_yr = len(yr_short_labels)
+        n_cagr = len(cagr_cols)
+        yr_col_w = 62
+        cagr_col_w = 72
+        control_col_w = 68
+        fixed_w = n_yr * yr_col_w + n_cagr * cagr_col_w + control_col_w
+        remaining = max(400, 1100 - fixed_w)
+        inst_w = int(remaining * 0.6)
+        city_w = remaining - inst_w
+
+        col_cfg = {
+            "Institution": st.column_config.TextColumn("Institution", width=inst_w),
+            "City": st.column_config.TextColumn("City", width=city_w),
+            "Control": st.column_config.TextColumn("Control", width=control_col_w),
+            **{
+                yr_label_short(y): st.column_config.NumberColumn(
+                    yr_label_short(y), format="%,d", width=yr_col_w,
+                )
+                for y in yr_cols
+            },
+        }
+        if "Post-COVID CAGR" in cagr_cols:
+            col_cfg["Post-COVID CAGR"] = st.column_config.NumberColumn(
+                f"Post-COVID CAGR ({yr_label_short(col_3ago)} → {yr_label_short(last_col)})",
+                format="%.1f%%",
+                width=cagr_col_w,
+            )
+        if "Past Decade CAGR" in cagr_cols:
+            col_cfg["Past Decade CAGR"] = st.column_config.NumberColumn(
+                f"Past Decade CAGR ({yr_label_short(first_col)} → {yr_label_short(last_col)})",
+                format="%.1f%%",
+                width=cagr_col_w,
+            )
+
+        st.dataframe(
+            pivot,
+            use_container_width=True,
+            hide_index=True,
+            column_config=col_cfg,
+        )
 
 
     # ── Graduate Outcomes (College Scorecard) ────────────────────────────────
@@ -5837,123 +6117,6 @@ def main():
                 column_config=sc_col_cfg,
                 height=min(len(sc_display) * 35 + 40, 600),
             )
-
-
-    # ── By Institution ────────────────────────────────────────────────────────
-    st.divider()
-    st.subheader("Completions by Institution")
-    st.caption(
-        "Annual completions per institution for the selected filters, "
-        "sorted by latest-year volume. "
-        "**Past Decade CAGR** = compound annual growth rate across the full "
-        "available data window (≈10 one-year intervals between bookend years). "
-        "**Post-COVID CAGR** = the same formula applied only to the three "
-        "most recent years (starting AY 2020-21, the first full pandemic "
-        "academic year), isolating current momentum from pre-pandemic trend. "
-        "Both use `(end / start)^(1/n) − 1`. Institutions with zero "
-        "completions in either bookend year show no CAGR. "
-        "| Source: NCES IPEDS Completions Survey."
-    )
-
-    if df_inst.empty:
-        st.info("No institution-level data for these filters.")
-    else:
-        # Get latest metadata per unitid (name may change across years)
-        meta = (
-            df_inst.sort_values("year")
-            .groupby("unitid")[["instnm", "city", "stabbr", "control_name"]]
-            .last()
-            .reset_index()
-        )
-
-        # Pivot on unitid only so name changes don't split rows
-        pivot = df_inst.pivot_table(
-            index="unitid",
-            columns="year",
-            values="completions",
-            aggfunc="sum",
-            fill_value=0,
-        ).reset_index()
-        pivot = pivot.merge(meta, on="unitid", how="left")
-        pivot.columns.name = None
-        yr_cols = sorted([c for c in pivot.columns if isinstance(c, int)])
-
-        # CAGR per institution (stored as %, e.g. 2.3 means 2.3%)
-        first_col, last_col = yr_cols[0], yr_cols[-1]
-        n_years = last_col - first_col
-        col_3ago = last_col - 3
-
-        def inst_cagr(row, start_col, n):
-            fv, lv = row[start_col], row[last_col]
-            if fv > 0 and lv > 0 and n > 0:
-                return ((lv / fv) ** (1 / n) - 1) * 100
-            return None
-
-        if col_3ago in yr_cols:
-            pivot["Post-COVID CAGR"] = pivot.apply(lambda r: inst_cagr(r, col_3ago, 3), axis=1)
-        pivot["Past Decade CAGR"] = pivot.apply(lambda r: inst_cagr(r, first_col, n_years), axis=1)
-        pivot = pivot.rename(columns={y: yr_label_short(y) for y in yr_cols})
-        last_yr_short = yr_label_short(last_col)
-        pivot = pivot.sort_values(last_yr_short, ascending=False, na_position="last").reset_index(drop=True)
-        control_map = {"Public": "Public", "Private nonprofit": "Private", "Private for-profit": "For-Profit"}
-        pivot["control_name"] = pivot["control_name"].map(control_map).fillna(pivot["control_name"])
-        pivot["city"] = pivot["city"] + ", " + pivot["stabbr"]
-        pivot = pivot.drop(columns=["unitid", "stabbr"])
-        pivot = pivot.rename(columns={"instnm": "Institution", "city": "City", "control_name": "Control"})
-        cagr_cols = [c for c in ["Post-COVID CAGR", "Past Decade CAGR"] if c in pivot.columns]
-        yr_short_labels = [yr_label_short(y) for y in yr_cols]
-        pivot = pivot[["Institution", "City", "Control"] + yr_short_labels + cagr_cols]
-
-        n_institutions = len(pivot)
-        st.caption(f"{n_institutions:,} institutions reported completions for these filters")
-
-        # Smaller font for the institution table
-        st.markdown(
-            "<style>div[data-testid='stDataFrame'] table {font-size: 0.78rem;}</style>",
-            unsafe_allow_html=True,
-        )
-
-        # Compute column widths so the table fits without horizontal scroll.
-        n_yr = len(yr_short_labels)
-        n_cagr = len(cagr_cols)
-        yr_col_w = 62
-        cagr_col_w = 72
-        control_col_w = 68
-        fixed_w = n_yr * yr_col_w + n_cagr * cagr_col_w + control_col_w
-        remaining = max(400, 1100 - fixed_w)
-        inst_w = int(remaining * 0.6)
-        city_w = remaining - inst_w
-
-        col_cfg = {
-            "Institution": st.column_config.TextColumn("Institution", width=inst_w),
-            "City": st.column_config.TextColumn("City", width=city_w),
-            "Control": st.column_config.TextColumn("Control", width=control_col_w),
-            **{
-                yr_label_short(y): st.column_config.NumberColumn(
-                    yr_label_short(y), format="%,d", width=yr_col_w,
-                )
-                for y in yr_cols
-            },
-        }
-        if "Post-COVID CAGR" in cagr_cols:
-            col_cfg["Post-COVID CAGR"] = st.column_config.NumberColumn(
-                f"Post-COVID CAGR ({yr_label_short(col_3ago)} → {yr_label_short(last_col)})",
-                format="%.1f%%",
-                width=cagr_col_w,
-            )
-        if "Past Decade CAGR" in cagr_cols:
-            col_cfg["Past Decade CAGR"] = st.column_config.NumberColumn(
-                f"Past Decade CAGR ({yr_label_short(first_col)} → {yr_label_short(last_col)})",
-                format="%.1f%%",
-                width=cagr_col_w,
-            )
-
-        st.dataframe(
-            pivot,
-            use_container_width=True,
-            hide_index=True,
-            column_config=col_cfg,
-        )
 
     # ── Distance Education Programs ──────────────────────────────────────────
     # Hidden from UI via SHOW_DISTANCE_EDUCATION_UI; backend retained.
