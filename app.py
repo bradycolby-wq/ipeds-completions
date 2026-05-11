@@ -3361,16 +3361,21 @@ def _render_rankings_page():
     """Demand rankings — Top Programs by Market | Top Markets by Program."""
     st.title("Demand Rankings")
     st.caption(
-        "Scored, letter-graded leaderboards. Each composite score is built "
-        "from related-occupation employment volume + growth + projection, "
-        "weighted wages, Scorecard graduate earnings, Google Trends search "
-        "interest, and the LMI Institute automation-resilience score "
-        "(11 − risk). Components are z-scored within the cohort, weighted, "
-        "and converted to a 0-100 composite; letter grades reflect the "
-        "**percentile within the cohort**, not an absolute floor. "
-        "| Sources: BLS OES, BLS Employment Projections, NCES IPEDS, "
-        "U.S. Dept of Education College Scorecard, Google Trends, "
-        "LMI Institute Automation Exposure Index."
+        "Scored, letter-graded leaderboards. The composite score is "
+        "anchored on **completions volume + long-term completions trend "
+        "(10-year CAGR) + post-COVID completions trend (since AY 2020-21)** "
+        "— those three drive the bulk of the rank. Secondary signals: "
+        "related-occupation employment (volume / 5-yr growth / BLS "
+        "projection), employment-weighted median wage, Scorecard graduate "
+        "earnings, Google Trends search interest **and** its multi-year "
+        "trend, average program size (completions per reporting "
+        "institution), and LMI Institute automation-resilience (11 − risk). "
+        "Components are z-scored within the cohort, weighted, and scaled "
+        "to a 0-100 composite; letter grades reflect the **percentile "
+        "within the cohort**, not an absolute floor. "
+        "| Sources: NCES IPEDS Completions, BLS OES, BLS Employment "
+        "Projections, U.S. Dept of Education College Scorecard, Google "
+        "Trends, LMI Institute Automation Exposure Index."
     )
 
     rank_mode = st.radio(
@@ -3618,6 +3623,12 @@ def _render_rank_table_programs(df: pd.DataFrame):
         "CIP":             df["cipcode"],
         "Program":         df["cipdesc"],
         "Completions":     df["completions"].apply(_fmt_int),
+        "Comp 10y CAGR":   df["completions_long_trend"].apply(_fmt_pct)
+                            if "completions_long_trend" in df.columns else "—",
+        "Comp Post-COVID": df["completions_pc_trend"].apply(_fmt_pct)
+                            if "completions_pc_trend" in df.columns else "—",
+        "Avg Program Size": df["avg_program_size"].apply(lambda v: _fmt_num(v, 0))
+                            if "avg_program_size" in df.columns else "—",
         "Related Emp.":    df["emp_volume"].apply(_fmt_int),
         "Past 5y CAGR":    df["emp_growth"].apply(_fmt_pct),
         "Projected CAGR":  df["emp_projection"].apply(_fmt_pct),
@@ -3626,6 +3637,8 @@ def _render_rank_table_programs(df: pd.DataFrame):
                             if "earnings" in df.columns else "—",
         "Search Interest": df["search_interest"].apply(lambda v: _fmt_num(v, 1))
                             if "search_interest" in df.columns else "—",
+        "Search Trend":    df["search_trend"].apply(_fmt_pct)
+                            if "search_trend" in df.columns else "—",
         "Auto Risk":       df["automation_risk"].apply(lambda v: _fmt_num(v, 1))
                             if "automation_risk" in df.columns else "—",
     })
@@ -3677,6 +3690,14 @@ def _render_rank_table_markets(df: pd.DataFrame, market_grain: str, program_labe
         "Grade":           df["grade"],
         "Score":           df["composite"].apply(lambda v: _fmt_num(v, 1)),
         "Market":          df["area_label"],
+        "Local Grads":     df["completions"].apply(_fmt_int)
+                            if "completions" in df.columns else "—",
+        "Grad 10y CAGR":   df["completions_long_trend"].apply(_fmt_pct)
+                            if "completions_long_trend" in df.columns else "—",
+        "Grad Post-COVID": df["completions_pc_trend"].apply(_fmt_pct)
+                            if "completions_pc_trend" in df.columns else "—",
+        "Avg Program Size": df["avg_program_size"].apply(lambda v: _fmt_num(v, 0))
+                            if "avg_program_size" in df.columns else "—",
         "Related Emp.":    df["emp_volume"].apply(_fmt_int),
         "LQ":              df["location_quotient"].apply(lambda v: _fmt_num(v, 2))
                             if "location_quotient" in df.columns else "—",
@@ -3685,8 +3706,8 @@ def _render_rank_table_markets(df: pd.DataFrame, market_grain: str, program_labe
         "Median Wage":     df["wage"].apply(_fmt_money),
         "Search Interest": df["search_interest"].apply(lambda v: _fmt_num(v, 1))
                             if "search_interest" in df.columns else "—",
-        "Local Grads":     df["completions"].apply(_fmt_int)
-                            if "completions" in df.columns else "—",
+        "Search Trend":    df["search_trend"].apply(_fmt_pct)
+                            if "search_trend" in df.columns else "—",
         "Emp / Grad+1":    df["competition_inv"].apply(lambda v: _fmt_num(v, 1))
                             if "competition_inv" in df.columns else "—",
     })

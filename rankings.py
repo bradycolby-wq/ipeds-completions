@@ -96,6 +96,19 @@ def _zscore(values: pd.Series) -> pd.Series:
     return (v - mean) / std
 
 
+# CAGR columns where a hard cap is applied before z-scoring. These trend
+# metrics can blow up to +400% / year off tiny bases (e.g. a program that
+# went from 3 grads to 600 grads in three years). Without a cap, a couple
+# of such outliers compress the rest of the cohort to near-zero z-scores
+# and end up dominating the composite. ±50%/year keeps the direction of
+# the signal but limits the impact of low-base noise.
+_CAGR_CAP = 0.50  # ±50% per year
+
+
+def _cap_trend(series: pd.Series, cap: float = _CAGR_CAP) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").clip(-cap, cap)
+
+
 def _composite(df: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
     """Weighted sum of z-scored components, scaled to 0-100.
 
@@ -129,24 +142,42 @@ def _composite(df: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
 
 # ── Component weights ────────────────────────────────────────────────────────
 
+# Weights are tuned so the completions cluster (volume + long-term trend +
+# post-COVID trend) is the single biggest driver of the composite — that's
+# the strongest direct signal of program demand at the institutional level.
+# Employment + wage signals are still meaningful but secondary.
 PROGRAM_WEIGHTS = {
-    "emp_volume":           0.25,   # absolute size of opportunity
-    "emp_growth":           0.15,   # recent momentum (5y CAGR)
-    "emp_projection":       0.15,   # BLS projected CAGR (next 10y)
-    "wage":                 0.15,   # employment-weighted median wage
-    "earnings":             0.10,   # Scorecard median earnings 4yr post-grad
-    "search_interest":      0.10,   # Google Trends interest in geography
-    "automation_resilience":0.10,   # 11 - LMII risk
+    "completions_volume":        0.20,   # # of awards in latest year (geo-scoped)
+    "completions_long_trend":    0.12,   # 10y CAGR of completions
+    "completions_pc_trend":      0.12,   # 3y post-COVID CAGR of completions
+    "emp_volume":                0.10,   # related-occupation employment
+    "emp_growth":                0.06,   # OES 5y CAGR
+    "emp_projection":            0.08,   # BLS-projected CAGR
+    "wage":                      0.08,   # employment-weighted median wage
+    "earnings":                  0.05,   # Scorecard 4yr-post-grad earnings
+    "search_interest":           0.04,   # Google Trends avg interest
+    "search_trend":              0.04,   # Google Trends 12mo vs earliest 12mo
+    "avg_program_size":          0.04,   # completions per reporting institution
+    "automation_resilience":     0.07,   # 11 − LMII risk
 }
 
+# In markets mode, "completions" means local grad supply for the chosen
+# program. We treat the count and the trend as positive demand signals
+# (institutions only sustain a program if students show up) while keeping
+# competition_inv as a separate opportunity-gap metric.
 MARKET_WEIGHTS = {
-    "emp_volume":         0.25,
-    "location_quotient":  0.15,
-    "emp_growth":         0.15,
-    "emp_projection":     0.15,
-    "wage":               0.15,
-    "search_interest":    0.10,
-    "competition_inv":    0.05,
+    "emp_volume":                0.15,
+    "completions_volume":        0.12,   # local grads in latest year
+    "completions_long_trend":    0.10,   # 10y CAGR of local grads
+    "completions_pc_trend":      0.10,   # 3y post-COVID CAGR of local grads
+    "location_quotient":         0.10,
+    "emp_growth":                0.08,
+    "emp_projection":            0.10,
+    "wage":                      0.08,
+    "search_interest":           0.04,
+    "search_trend":              0.04,
+    "avg_program_size":          0.04,
+    "competition_inv":           0.05,
 }
 
 
@@ -266,6 +297,69 @@ def score_programs_for_geo(
         return pd.DataFrame()
     cipcodes = tuple(elig["cipcode"].tolist())
     cip_ph = ",".join("?" * len(cipcodes))
+
+    # ── 1b. Completions trends + average program size (per CIP at this geo).
+    # Long-term trend uses the earliest IPEDS year available; post-COVID
+    # trend uses AY 2020-21 → latest. Average program size = latest-year
+    # completions / # of reporting institutions, a proxy for whether the
+    # demand is concentrated at scale-grade institutions or spread thin.
+    earliest_yr = conn.execute(
+        "SELECT MIN(year) FROM completions"
+    ).fetchone()[0]
+    pc_base_yr = 2021  # AY 2020-21, the first full pandemic academic year
+
+    def _completions_for_year(year: int) -> pd.DataFrame:
+        sql = f"""
+            SELECT c.cipcode,
+                   SUM(c.ctotalt) AS completions,
+                   COUNT(DISTINCT CASE WHEN c.ctotalt > 0
+                                       THEN c.unitid END) AS n_inst
+            FROM completions c
+            {comp_geo_join}
+            WHERE c.year = ?
+              AND c.awlevel IN ({awlevel_ph})
+              AND c.cipcode IN ({cip_ph})
+              {comp_geo_where}
+            GROUP BY c.cipcode
+        """
+        return pd.read_sql_query(
+            sql, conn,
+            params=[year] + list(awlevels) + list(cipcodes) + comp_geo_params,
+        )
+
+    comp_long = _completions_for_year(earliest_yr).rename(
+        columns={"completions": "comp_long_base", "n_inst": "n_inst_long_base"}
+    )
+    comp_pc = _completions_for_year(pc_base_yr).rename(
+        columns={"completions": "comp_pc_base", "n_inst": "n_inst_pc_base"}
+    )
+    comp_latest = _completions_for_year(latest_yr).rename(
+        columns={"completions": "comp_latest", "n_inst": "n_inst_latest"}
+    )
+    long_span = max(1, latest_yr - earliest_yr)
+    pc_span = max(1, latest_yr - pc_base_yr)
+
+    completions_metrics = comp_latest.merge(comp_long, on="cipcode", how="left")
+    completions_metrics = completions_metrics.merge(comp_pc, on="cipcode", how="left")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        completions_metrics["completions_long_trend"] = np.where(
+            (completions_metrics["comp_long_base"] > 0)
+            & (completions_metrics["comp_latest"] > 0),
+            (completions_metrics["comp_latest"]
+             / completions_metrics["comp_long_base"]) ** (1 / long_span) - 1,
+            np.nan,
+        )
+        completions_metrics["completions_pc_trend"] = np.where(
+            (completions_metrics["comp_pc_base"] > 0)
+            & (completions_metrics["comp_latest"] > 0),
+            (completions_metrics["comp_latest"]
+             / completions_metrics["comp_pc_base"]) ** (1 / pc_span) - 1,
+            np.nan,
+        )
+        completions_metrics["avg_program_size"] = (
+            completions_metrics["comp_latest"]
+            / completions_metrics["n_inst_latest"].replace(0, np.nan)
+        )
 
     # ── 2. CIP → SOC mapping for these CIPs
     mapping = pd.read_sql_query(
@@ -451,6 +545,46 @@ def score_programs_for_geo(
         search_df = pd.read_sql_query(sql_search, conn, params=list(cipcodes))
     cip_agg = cip_agg.merge(search_df, on="cipcode", how="left")
 
+    # ── 8b. Search trend per CIP. State-level time series is sparsely
+    # populated, so we use the national google_trends_time table for the
+    # trend signal regardless of geo. Compare the most recent 365 days to
+    # the first 365 days in the table; positive = rising interest.
+    trend_window = conn.execute(
+        "SELECT MIN(date), MAX(date) FROM google_trends_time"
+    ).fetchone()
+    search_trend_df = pd.DataFrame(columns=["cipcode", "search_trend"])
+    if trend_window and trend_window[0] and trend_window[1]:
+        first_date, last_date = trend_window
+        sql_search_trend = f"""
+            WITH bounded AS (
+                SELECT cipcode, date, interest
+                FROM google_trends_time
+                WHERE cipcode IN ({cip_ph})
+            ),
+            recent AS (
+                SELECT cipcode, AVG(interest) AS avg_recent
+                FROM bounded
+                WHERE date >= date(?, '-365 days')
+                GROUP BY cipcode
+            ),
+            earliest AS (
+                SELECT cipcode, AVG(interest) AS avg_early
+                FROM bounded
+                WHERE date <= date(?, '+365 days')
+                GROUP BY cipcode
+            )
+            SELECT r.cipcode,
+                   CASE WHEN e.avg_early > 0
+                        THEN (r.avg_recent - e.avg_early) / e.avg_early
+                        ELSE NULL END AS search_trend
+            FROM recent r LEFT JOIN earliest e ON e.cipcode = r.cipcode
+        """
+        search_trend_df = pd.read_sql_query(
+            sql_search_trend, conn,
+            params=list(cipcodes) + [last_date, first_date],
+        )
+    cip_agg = cip_agg.merge(search_trend_df, on="cipcode", how="left")
+
     # ── 9. Automation risk (employment-weighted across SOCs)
     risk = pd.read_sql_query(
         "SELECT occ_code, risk_score FROM occ_automation_risk",
@@ -477,8 +611,19 @@ def score_programs_for_geo(
                             on="cipcode", how="left")
     cip_agg["automation_resilience"] = 11 - cip_agg["automation_risk"]
 
-    # ── 10. Completions volume (already computed in step 1)
+    # ── 10. Completions metrics: latest volume + 10-yr trend + post-COVID
+    # trend + average program size (computed in step 1b).
     cip_agg = cip_agg.merge(elig, on="cipcode", how="left")
+    cip_agg = cip_agg.merge(
+        completions_metrics[[
+            "cipcode", "completions_long_trend",
+            "completions_pc_trend", "avg_program_size",
+        ]],
+        on="cipcode", how="left",
+    )
+    # Mirror "completions" → "completions_volume" so the scoring engine can
+    # pick it up by the weight key. Keeping `completions` around for display.
+    cip_agg["completions_volume"] = cip_agg["completions"]
 
     # ── 11. Friendly CIP title
     cip_titles = pd.read_sql_query(
@@ -490,10 +635,17 @@ def score_programs_for_geo(
     cip_agg["cipdesc"] = cip_agg["cipcode"].apply(lambda c: title_map.get(c, c))
 
     # ── 12. Score, grade, rank
-    # Log-transform raw emp_volume before z-scoring (counts span orders of
-    # magnitude). Other components are kept on their natural scale.
+    # Log-transform raw volume metrics before z-scoring (counts span orders
+    # of magnitude). Trend / wage / size kept on their natural scale, with
+    # CAGR columns capped at ±50%/yr to neutralize low-base outliers.
     cip_scoring = cip_agg.copy()
-    cip_scoring["emp_volume"] = np.log1p(cip_scoring["emp_volume"].fillna(0))
+    for col in ("emp_volume", "completions_volume", "avg_program_size"):
+        if col in cip_scoring.columns:
+            cip_scoring[col] = np.log1p(cip_scoring[col].fillna(0))
+    for col in ("completions_long_trend", "completions_pc_trend",
+                "emp_growth", "emp_projection", "search_trend"):
+        if col in cip_scoring.columns:
+            cip_scoring[col] = _cap_trend(cip_scoring[col])
     cip_agg["composite"] = _composite(cip_scoring, PROGRAM_WEIGHTS)
     cip_agg["grade"] = letter_grades(cip_agg["composite"])
     cip_agg["rank"] = cip_agg["composite"].rank(ascending=False, method="min").astype("Int64")
@@ -502,8 +654,9 @@ def score_programs_for_geo(
     keep = [
         "rank", "grade", "composite",
         "cipcode", "cipdesc", "completions", "n_socs",
+        "completions_long_trend", "completions_pc_trend", "avg_program_size",
         "emp_volume", "emp_growth", "emp_projection",
-        "wage", "earnings", "search_interest",
+        "wage", "earnings", "search_interest", "search_trend",
         "automation_risk", "automation_resilience",
     ]
     return cip_agg[[c for c in keep if c in cip_agg.columns]]
@@ -681,46 +834,144 @@ def score_markets_for_program(
     else:
         df["search_interest"] = np.nan
 
-    # ── Completions per market (for competition-inverse metric)
+    # ── Completions per market: latest year + 10y-ago + post-COVID base.
+    # We compute volume (now), avg program size (per institution), and
+    # CAGR over both the long-term and post-COVID windows.
     latest_comp_yr = conn.execute("SELECT MAX(year) FROM completions").fetchone()[0]
+    earliest_comp_yr = conn.execute("SELECT MIN(year) FROM completions").fetchone()[0]
+    pc_base_yr = 2021
     awlevel_ph = ",".join("?" * len(awlevels))
-    if market_grain == "state":
-        sql_comp = f"""
-            SELECT i.stabbr AS state_abbr, SUM(c.ctotalt) AS completions
-            FROM completions c
-            JOIN institutions i ON i.unitid = c.unitid AND i.year = c.year
-            WHERE c.year = ?
-              AND c.cipcode = ?
-              AND c.awlevel IN ({awlevel_ph})
-            GROUP BY i.stabbr
-        """
-        comp_df = pd.read_sql_query(
-            sql_comp, conn,
-            params=[latest_comp_yr, cipcode] + list(awlevels),
-        )
-        df = df.merge(comp_df, on="state_abbr", how="left")
-    else:
-        sql_comp = f"""
-            SELECT i.cbsa AS cbsa, SUM(c.ctotalt) AS completions
-            FROM completions c
-            JOIN institutions i ON i.unitid = c.unitid AND i.year = c.year
-            WHERE c.year = ?
-              AND c.cipcode = ?
-              AND c.awlevel IN ({awlevel_ph})
-              AND i.cbsa IS NOT NULL
-            GROUP BY i.cbsa
-        """
-        comp_df = pd.read_sql_query(
-            sql_comp, conn,
-            params=[latest_comp_yr, cipcode] + list(awlevels),
-        )
-        # BLS metro area_code is "00" + 5-digit CBSA
-        df["cbsa"] = df["area_code"].astype(str).str[2:]
-        df = df.merge(comp_df, on="cbsa", how="left")
 
-    df["completions"] = df["completions"].fillna(0)
+    def _comp_by_market(year: int) -> pd.DataFrame:
+        if market_grain == "state":
+            sql = f"""
+                SELECT i.stabbr AS state_abbr,
+                       SUM(c.ctotalt) AS completions,
+                       COUNT(DISTINCT CASE WHEN c.ctotalt > 0
+                                           THEN c.unitid END) AS n_inst
+                FROM completions c
+                JOIN institutions i ON i.unitid = c.unitid AND i.year = c.year
+                WHERE c.year = ?
+                  AND c.cipcode = ?
+                  AND c.awlevel IN ({awlevel_ph})
+                GROUP BY i.stabbr
+            """
+        else:
+            sql = f"""
+                SELECT i.cbsa AS cbsa,
+                       SUM(c.ctotalt) AS completions,
+                       COUNT(DISTINCT CASE WHEN c.ctotalt > 0
+                                           THEN c.unitid END) AS n_inst
+                FROM completions c
+                JOIN institutions i ON i.unitid = c.unitid AND i.year = c.year
+                WHERE c.year = ?
+                  AND c.cipcode = ?
+                  AND c.awlevel IN ({awlevel_ph})
+                  AND i.cbsa IS NOT NULL
+                GROUP BY i.cbsa
+            """
+        return pd.read_sql_query(
+            sql, conn, params=[year, cipcode] + list(awlevels),
+        )
+
+    comp_latest = _comp_by_market(latest_comp_yr).rename(
+        columns={"completions": "comp_latest", "n_inst": "n_inst_latest"}
+    )
+    comp_long_base = _comp_by_market(earliest_comp_yr).rename(
+        columns={"completions": "comp_long_base", "n_inst": "n_inst_long_base"}
+    )
+    comp_pc_base = _comp_by_market(pc_base_yr).rename(
+        columns={"completions": "comp_pc_base", "n_inst": "n_inst_pc_base"}
+    )
+    long_span = max(1, latest_comp_yr - earliest_comp_yr)
+    pc_span = max(1, latest_comp_yr - pc_base_yr)
+
+    if market_grain == "state":
+        join_key = "state_abbr"
+    else:
+        join_key = "cbsa"
+        df["cbsa"] = df["area_code"].astype(str).str[2:]
+
+    df = df.merge(comp_latest, on=join_key, how="left")
+    df = df.merge(comp_long_base[[join_key, "comp_long_base"]], on=join_key, how="left")
+    df = df.merge(comp_pc_base[[join_key, "comp_pc_base"]], on=join_key, how="left")
+
+    df["completions"] = df["comp_latest"].fillna(0)
+    df["completions_volume"] = df["completions"]
+    df["avg_program_size"] = (
+        df["comp_latest"] / df["n_inst_latest"].replace(0, np.nan)
+    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        df["completions_long_trend"] = np.where(
+            (df["comp_long_base"] > 0) & (df["comp_latest"] > 0),
+            (df["comp_latest"] / df["comp_long_base"]) ** (1 / long_span) - 1,
+            np.nan,
+        )
+        df["completions_pc_trend"] = np.where(
+            (df["comp_pc_base"] > 0) & (df["comp_latest"] > 0),
+            (df["comp_latest"] / df["comp_pc_base"]) ** (1 / pc_span) - 1,
+            np.nan,
+        )
     # Opportunity = emp_volume / (completions + 1) — fewer grads per job = better
     df["competition_inv"] = df["emp_volume"] / (df["completions"] + 1)
+
+    # ── Search trend per state (national fallback for metros).
+    trend_window = conn.execute(
+        "SELECT MIN(date), MAX(date) FROM google_trends_state_time"
+    ).fetchone()
+    nat_trend_window = conn.execute(
+        "SELECT MIN(date), MAX(date) FROM google_trends_time"
+    ).fetchone()
+    if (market_grain == "state"
+            and trend_window and trend_window[0] and trend_window[1]):
+        first_d, last_d = trend_window
+        sql_st = """
+            WITH recent AS (
+                SELECT state_abbr, AVG(interest) AS avg_recent
+                FROM google_trends_state_time
+                WHERE cipcode = ? AND date >= date(?, '-365 days')
+                GROUP BY state_abbr
+            ),
+            earliest AS (
+                SELECT state_abbr, AVG(interest) AS avg_early
+                FROM google_trends_state_time
+                WHERE cipcode = ? AND date <= date(?, '+365 days')
+                GROUP BY state_abbr
+            )
+            SELECT r.state_abbr,
+                   CASE WHEN e.avg_early > 0
+                        THEN (r.avg_recent - e.avg_early) / e.avg_early
+                        ELSE NULL END AS search_trend
+            FROM recent r LEFT JOIN earliest e ON e.state_abbr = r.state_abbr
+        """
+        st_trend = pd.read_sql_query(
+            sql_st, conn, params=[cipcode, last_d, cipcode, first_d],
+        )
+        df = df.merge(st_trend, on="state_abbr", how="left")
+    if nat_trend_window and nat_trend_window[0] and nat_trend_window[1]:
+        nat_first, nat_last = nat_trend_window
+        nat_row = conn.execute(
+            """
+            SELECT
+              (SELECT AVG(interest) FROM google_trends_time
+                 WHERE cipcode = ? AND date >= date(?, '-365 days')) AS r,
+              (SELECT AVG(interest) FROM google_trends_time
+                 WHERE cipcode = ? AND date <= date(?, '+365 days')) AS e
+            """,
+            (cipcode, nat_last, cipcode, nat_first),
+        ).fetchone()
+        nat_search_trend = (
+            (nat_row[0] - nat_row[1]) / nat_row[1]
+            if nat_row and nat_row[0] is not None and nat_row[1] and nat_row[1] > 0
+            else None
+        )
+        if "search_trend" not in df.columns:
+            df["search_trend"] = nat_search_trend
+        else:
+            df["search_trend"] = df["search_trend"].fillna(nat_search_trend)
+    else:
+        if "search_trend" not in df.columns:
+            df["search_trend"] = np.nan
 
     # ── Exclude territories
     if market_grain == "state":
@@ -731,7 +982,13 @@ def score_markets_for_program(
 
     # ── Score, grade, rank
     df_scoring = df.copy()
-    df_scoring["emp_volume"] = np.log1p(df_scoring["emp_volume"].fillna(0))
+    for col in ("emp_volume", "completions_volume", "avg_program_size"):
+        if col in df_scoring.columns:
+            df_scoring[col] = np.log1p(df_scoring[col].fillna(0))
+    for col in ("completions_long_trend", "completions_pc_trend",
+                "emp_growth", "emp_projection", "search_trend"):
+        if col in df_scoring.columns:
+            df_scoring[col] = _cap_trend(df_scoring[col])
     df["composite"] = _composite(df_scoring, MARKET_WEIGHTS)
     df["grade"] = letter_grades(df["composite"])
     df["rank"] = df["composite"].rank(ascending=False, method="min").astype("Int64")
@@ -740,7 +997,9 @@ def score_markets_for_program(
     keep = [
         "rank", "grade", "composite", "area_label", "area_code",
         "emp_volume", "location_quotient", "emp_growth", "emp_projection",
-        "wage", "search_interest", "completions", "competition_inv",
+        "wage", "search_interest", "search_trend",
+        "completions", "completions_long_trend", "completions_pc_trend",
+        "avg_program_size", "competition_inv",
     ]
     out = df[[c for c in keep if c in df.columns]]
     if top_n:
