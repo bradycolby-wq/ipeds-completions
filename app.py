@@ -3524,7 +3524,7 @@ def main():
 
     _windows = get_data_windows()
     with st.sidebar:
-        st.image("https://id-preview--4a814ad5-bd22-4b23-b9ba-2a02d390cdaf.lovable.app/assets/vi-hub-logo-D4gQKMhd.png", use_container_width=True)
+        st.image("vi-logo.png", use_container_width=True)
         if _windows.get("completions"):
             _yr_min, _yr_max = _windows["completions"]
             st.caption(
@@ -3540,8 +3540,16 @@ def main():
             _diag_vol = _diag_conn.execute(
                 "SELECT COUNT(*) FROM search_volume_calibration"
             ).fetchone()[0]
+            # Detect DB version by feature presence (best-effort, fail-soft)
+            try:
+                _has_auto = _diag_conn.execute(
+                    "SELECT 1 FROM occ_automation_risk LIMIT 1"
+                ).fetchone() is not None
+            except Exception:
+                _has_auto = False
             _diag_conn.close()
-            st.caption(f"DB: v1.5 | Volume cal: {_diag_vol} keywords")
+            _db_ver = "v1.7" if _has_auto else "v1.6"
+            st.caption(f"DB: {_db_ver} | Volume cal: {_diag_vol} keywords")
         except Exception:
             st.caption("DB: pre-v1.5 (no volume calibration)")
 
@@ -4078,30 +4086,15 @@ def main():
         st.markdown(
             "<div style='height:6px'></div>", unsafe_allow_html=True,
         )
-        _bcol1, _bcol2 = st.columns([1, 1])
-        with _bcol1:
-            _go = st.button(
-                "Generate", type="primary", use_container_width=True,
-                key="export_generate",
-            )
-        with _bcol2:
-            if "_export_payload" in st.session_state:
-                st.download_button(
-                    f"⬇  Download {st.session_state.get('_export_format_label', '')}",
-                    data=st.session_state["_export_payload"],
-                    file_name=st.session_state["_export_fname"],
-                    mime=st.session_state["_export_mime"],
-                    use_container_width=True,
-                    key="export_download",
-                )
-            else:
-                st.markdown(
-                    "<div style='color:#9CA3AF; font-size:0.82rem; "
-                    "padding-top:10px; text-align:center;'>"
-                    "Click <b>Generate</b> to build</div>",
-                    unsafe_allow_html=True,
-                )
 
+        _go = st.button(
+            "Generate", type="primary", use_container_width=True,
+            key="export_generate",
+        )
+
+        # Build the report when Generate is pressed. We render the download
+        # button below in the SAME dialog turn — calling st.rerun() here
+        # would close the dialog and the user would never see the download.
         if _go:
             keep = set(chosen_sections) if chosen_sections else set(selectable_sections)
             with st.spinner("Collecting section data…"):
@@ -4109,36 +4102,55 @@ def main():
             filtered = [s for s in all_sheets if s[0] == "Summary" or s[0] in keep]
 
             with st.spinner(f"Building {export_format}…"):
-                if export_format == "Excel (.xlsx)":
-                    payload = build_export_workbook(filtered)
-                    fname = f"{base_fname}.xlsx"
-                    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    fmt_label = "Excel"
-                elif export_format == "CSV (.zip)":
-                    payload = build_csv_zip(filtered)
-                    fname = f"{base_fname}.zip"
-                    mime = "application/zip"
-                    fmt_label = "CSV"
-                else:  # PDF report
-                    payload = build_pdf_report(
-                        [s for s in filtered if s[0] != "Summary"],
-                        report_meta={
-                            "title": "IPEDS Completions Report",
-                            "subtitle": f"{cip_display} · {level_str}",
-                            "geo_label": geo_label,
-                            "cip_display": cip_display,
-                            "level_str": level_str,
-                        },
-                    )
-                    fname = f"{base_fname}.pdf"
-                    mime = "application/pdf"
-                    fmt_label = "PDF"
+                try:
+                    if export_format == "Excel (.xlsx)":
+                        payload = build_export_workbook(filtered)
+                        fname = f"{base_fname}.xlsx"
+                        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        fmt_label = "Excel"
+                    elif export_format == "CSV (.zip)":
+                        payload = build_csv_zip(filtered)
+                        fname = f"{base_fname}.zip"
+                        mime = "application/zip"
+                        fmt_label = "CSV"
+                    else:  # PDF report
+                        payload = build_pdf_report(
+                            [s for s in filtered if s[0] != "Summary"],
+                            report_meta={
+                                "title": "IPEDS Completions Report",
+                                "subtitle": f"{cip_display} · {level_str}",
+                                "geo_label": geo_label,
+                                "cip_display": cip_display,
+                                "level_str": level_str,
+                            },
+                        )
+                        fname = f"{base_fname}.pdf"
+                        mime = "application/pdf"
+                        fmt_label = "PDF"
+                except Exception as e:
+                    st.error(f"Couldn't build {export_format}: {e}")
+                    payload = None
 
-            st.session_state["_export_payload"] = payload
-            st.session_state["_export_fname"] = fname
-            st.session_state["_export_mime"] = mime
-            st.session_state["_export_format_label"] = fmt_label
-            st.rerun()
+            if payload:
+                st.session_state["_export_payload"] = payload
+                st.session_state["_export_fname"] = fname
+                st.session_state["_export_mime"] = mime
+                st.session_state["_export_format_label"] = fmt_label
+
+        # Render the download button inline whenever a payload is available.
+        # This runs on the same dialog turn as Generate (so the user sees the
+        # button immediately) AND on subsequent reopens of the dialog.
+        if "_export_payload" in st.session_state:
+            st.download_button(
+                f"⬇  Download {st.session_state.get('_export_format_label', '')}"
+                f" — {st.session_state.get('_export_fname', '')}",
+                data=st.session_state["_export_payload"],
+                file_name=st.session_state["_export_fname"],
+                mime=st.session_state["_export_mime"],
+                use_container_width=True,
+                key="export_download",
+                type="primary",
+            )
 
     # Single trigger button — pinned to the right.
     # Styled in the global stylesheet via the .vi-export-trigger marker class
