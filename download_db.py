@@ -7,7 +7,7 @@ from pathlib import Path
 
 DB_URL = (
     "https://github.com/bradycolby-wq/ipeds-completions/releases/"
-    "download/v1.7/ipeds.db"
+    "download/v1.8/ipeds.db"
 )
 
 dest = Path(__file__).parent / "ipeds.db"

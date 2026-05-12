@@ -252,54 +252,74 @@ def score_programs_for_geo(
     if area_sql is None:
         return pd.DataFrame()
 
-    # ── 1. Eligible CIPs: those with completions ≥ threshold at this level + geo
+    # ── 1. Eligible CIPs: those with completions ≥ threshold at this level + geo.
+    # Completions volume comes from the geographically-redistributed tables
+    # (completions_by_state / completions_by_metro), which attribute each
+    # institution's grads to where its students actually live per the NC-SARA
+    # window + CBSA-population model. National = raw completions table.
     latest_yr = conn.execute("SELECT MAX(year) FROM completions").fetchone()[0]
-
-    # Geo filter for completions: states map via institutions.stabbr;
-    # metros via institutions.cbsa. National = all.
-    comp_geo_join = ""
-    comp_geo_where = ""
-    comp_geo_params: list = []
-    if geo_key == "state" and geo_values:
-        comp_geo_join = (
-            " JOIN institutions i "
-            " ON i.unitid = c.unitid AND i.year = c.year"
-        )
-        ph = ",".join("?" * len(geo_values))
-        comp_geo_where = f" AND i.stabbr IN ({ph})"
-        comp_geo_params = list(geo_values)
-    elif geo_key == "metro" and geo_values:
-        comp_geo_join = (
-            " JOIN institutions i "
-            " ON i.unitid = c.unitid AND i.year = c.year"
-        )
-        ph = ",".join("?" * len(geo_values))
-        comp_geo_where = f" AND i.cbsa IN ({ph})"
-        comp_geo_params = list(str(v) for v in geo_values)
-
     awlevel_ph = ",".join("?" * len(awlevels))
     cip_family_clause = ""
     cip_family_params: list = []
     if cip_family:
-        cip_family_clause = " AND substr(c.cipcode, 1, 2) = ?"
+        cip_family_clause = " AND substr(cipcode, 1, 2) = ?"
         cip_family_params = [cip_family]
 
-    sql_eligible = f"""
-        SELECT c.cipcode, SUM(c.ctotalt) AS completions
-        FROM completions c
-        {comp_geo_join}
-        WHERE c.year = ?
-          AND c.awlevel IN ({awlevel_ph})
-          {comp_geo_where}
-          {cip_family_clause}
-        GROUP BY c.cipcode
-        HAVING SUM(c.ctotalt) >= ?
-        ORDER BY completions DESC
-    """
-    params_elig = (
-        [latest_yr] + list(awlevels) + comp_geo_params
-        + cip_family_params + [min_completions]
-    )
+    if geo_key == "state" and geo_values:
+        ph = ",".join("?" * len(geo_values))
+        sql_eligible = f"""
+            SELECT cipcode, SUM(completions) AS completions
+            FROM completions_by_state
+            WHERE year = ?
+              AND awlevel IN ({awlevel_ph})
+              AND dest_state IN ({ph})
+              {cip_family_clause}
+            GROUP BY cipcode
+            HAVING SUM(completions) >= ?
+            ORDER BY completions DESC
+        """
+        params_elig = (
+            [latest_yr] + list(awlevels) + list(geo_values)
+            + cip_family_params + [min_completions]
+        )
+    elif geo_key == "metro" and geo_values:
+        ph = ",".join("?" * len(geo_values))
+        sql_eligible = f"""
+            SELECT cipcode, SUM(completions) AS completions
+            FROM completions_by_metro
+            WHERE year = ?
+              AND awlevel IN ({awlevel_ph})
+              AND dest_cbsa IN ({ph})
+              {cip_family_clause}
+            GROUP BY cipcode
+            HAVING SUM(completions) >= ?
+            ORDER BY completions DESC
+        """
+        params_elig = (
+            [latest_yr] + list(awlevels)
+            + [str(v) for v in geo_values]
+            + cip_family_params + [min_completions]
+        )
+    else:
+        # National: redistribution preserves totals, so raw completions = sum.
+        cip_family_clause_raw = cip_family_clause.replace(
+            "substr(cipcode, 1, 2)", "substr(c.cipcode, 1, 2)"
+        )
+        sql_eligible = f"""
+            SELECT c.cipcode, SUM(c.ctotalt) AS completions
+            FROM completions c
+            WHERE c.year = ?
+              AND c.awlevel IN ({awlevel_ph})
+              {cip_family_clause_raw}
+            GROUP BY c.cipcode
+            HAVING SUM(c.ctotalt) >= ?
+            ORDER BY completions DESC
+        """
+        params_elig = (
+            [latest_yr] + list(awlevels)
+            + cip_family_params + [min_completions]
+        )
+
     elig = pd.read_sql_query(sql_eligible, conn, params=params_elig)
     if elig.empty:
         return pd.DataFrame()
@@ -316,24 +336,82 @@ def score_programs_for_geo(
     ).fetchone()[0]
     pc_base_yr = 2021  # AY 2020-21, the first full pandemic academic year
 
+    # Per-year volume comes from the redistributed table; n_inst (count of
+    # local institutions offering this CIP) stays HQ-based so the metric
+    # still answers "how many providers are physically here," distinct from
+    # the redistributed student-origin volume.
     def _completions_for_year(year: int) -> pd.DataFrame:
-        sql = f"""
+        if geo_key == "state" and geo_values:
+            geo_ph = ",".join("?" * len(geo_values))
+            vol_sql = f"""
+                SELECT cipcode, SUM(completions) AS completions
+                FROM completions_by_state
+                WHERE year = ?
+                  AND awlevel IN ({awlevel_ph})
+                  AND cipcode IN ({cip_ph})
+                  AND dest_state IN ({geo_ph})
+                GROUP BY cipcode
+            """
+            vol_params = ([year] + list(awlevels) + list(cipcodes)
+                          + list(geo_values))
+            ninst_extra_join = (
+                " JOIN institutions i "
+                " ON i.unitid = c.unitid AND i.year = c.year"
+            )
+            ninst_extra_where = f" AND i.stabbr IN ({geo_ph})"
+            ninst_extra_params = list(geo_values)
+        elif geo_key == "metro" and geo_values:
+            geo_ph = ",".join("?" * len(geo_values))
+            vol_sql = f"""
+                SELECT cipcode, SUM(completions) AS completions
+                FROM completions_by_metro
+                WHERE year = ?
+                  AND awlevel IN ({awlevel_ph})
+                  AND cipcode IN ({cip_ph})
+                  AND dest_cbsa IN ({geo_ph})
+                GROUP BY cipcode
+            """
+            vol_params = ([year] + list(awlevels) + list(cipcodes)
+                          + [str(v) for v in geo_values])
+            ninst_extra_join = (
+                " JOIN institutions i "
+                " ON i.unitid = c.unitid AND i.year = c.year"
+            )
+            ninst_extra_where = f" AND i.cbsa IN ({geo_ph})"
+            ninst_extra_params = [str(v) for v in geo_values]
+        else:
+            vol_sql = f"""
+                SELECT cipcode, SUM(ctotalt) AS completions
+                FROM completions
+                WHERE year = ?
+                  AND awlevel IN ({awlevel_ph})
+                  AND cipcode IN ({cip_ph})
+                GROUP BY cipcode
+            """
+            vol_params = [year] + list(awlevels) + list(cipcodes)
+            ninst_extra_join = ""
+            ninst_extra_where = ""
+            ninst_extra_params = []
+
+        vol = pd.read_sql_query(vol_sql, conn, params=vol_params)
+        ninst_sql = f"""
             SELECT c.cipcode,
-                   SUM(c.ctotalt) AS completions,
                    COUNT(DISTINCT CASE WHEN c.ctotalt > 0
                                        THEN c.unitid END) AS n_inst
             FROM completions c
-            {comp_geo_join}
+            {ninst_extra_join}
             WHERE c.year = ?
               AND c.awlevel IN ({awlevel_ph})
               AND c.cipcode IN ({cip_ph})
-              {comp_geo_where}
+              {ninst_extra_where}
             GROUP BY c.cipcode
         """
-        return pd.read_sql_query(
-            sql, conn,
-            params=[year] + list(awlevels) + list(cipcodes) + comp_geo_params,
+        ninst = pd.read_sql_query(
+            ninst_sql, conn,
+            params=[year] + list(awlevels) + list(cipcodes)
+                   + ninst_extra_params,
         )
+        return vol.merge(ninst, on="cipcode", how="left")
 
     comp_long = _completions_for_year(earliest_yr).rename(
         columns={"completions": "comp_long_base", "n_inst": "n_inst_long_base"}
@@ -852,75 +930,69 @@ def score_markets_for_program(
         df["search_interest"] = np.nan
 
     # ── Completions per market: latest year + 10y-ago + post-COVID base.
-    # We compute volume (now), avg program size (per institution), and
-    # CAGR over both the long-term and post-COVID windows.
+    # Volume comes from the geographically-redistributed tables — each
+    # institution's grads are attributed to where its students actually
+    # live (NC-SARA 3-year window for out-of-state, CBSA population for
+    # within-state spread, rural bucket for non-metro institutions). The
+    # old 1/3 discount for distance-only providers is no longer needed:
+    # redistribution handles HQ-state skew directly. `n_inst` stays
+    # HQ-based — it answers "how many providers are physically here," a
+    # distinct signal from student-origin volume.
     latest_comp_yr = conn.execute("SELECT MAX(year) FROM completions").fetchone()[0]
     earliest_comp_yr = conn.execute("SELECT MIN(year) FROM completions").fetchone()[0]
     pc_base_yr = 2021
     awlevel_ph = ",".join("?" * len(awlevels))
 
-    # Down-weight (not exclude) completions from exclusively-distance
-    # institutions. distance_ed_status.distnced = 1 marks an institution
-    # that operates entirely as a distance-education provider (Capella,
-    # WGU, Excelsior, etc.). Their grads are reported against the HQ
-    # state but a real share of those students live there too — they
-    # just aren't 100% local. Multiplying their ctotalt by 1/3 keeps a
-    # meaningful regional credit without letting an HQ skew the rank.
-    # Brick-and-mortar schools (including ones that offer a single online
-    # track, since distnced=2 for those) keep their full count.
-    #
-    # Caveat: hybrid providers like Chamberlain or Grand Canyon (large
-    # online cohorts attached to physical campuses) carry distnced=2 and
-    # so don't get discounted. We rely on the reduced completions-cluster
-    # weight to keep the remaining skew from dominating the score.
-    DISTANCE_DISCOUNT = 1.0 / 3.0
-
     def _comp_by_market(year: int) -> pd.DataFrame:
-        # If distance_ed_status doesn't have data for the requested year,
-        # fall back to the most recent year that does (some early years
-        # lack distance flags).
-        dist_year = conn.execute(
-            "SELECT MAX(year) FROM distance_ed_status WHERE year <= ?",
-            (year,),
-        ).fetchone()[0] or year
-        weighted_ctotalt = (
-            f"CASE WHEN d.distnced = 1 "
-            f"THEN c.ctotalt * {DISTANCE_DISCOUNT} ELSE c.ctotalt END"
-        )
         if market_grain == "state":
-            sql = f"""
+            vol_sql = f"""
+                SELECT dest_state AS state_abbr,
+                       SUM(completions) AS completions
+                FROM completions_by_state
+                WHERE year = ?
+                  AND cipcode = ?
+                  AND awlevel IN ({awlevel_ph})
+                GROUP BY dest_state
+            """
+            ninst_sql = f"""
                 SELECT i.stabbr AS state_abbr,
-                       SUM({weighted_ctotalt}) AS completions,
                        COUNT(DISTINCT CASE WHEN c.ctotalt > 0
                                            THEN c.unitid END) AS n_inst
                 FROM completions c
                 JOIN institutions i ON i.unitid = c.unitid AND i.year = c.year
-                LEFT JOIN distance_ed_status d
-                       ON d.unitid = c.unitid AND d.year = ?
                 WHERE c.year = ?
                   AND c.cipcode = ?
                   AND c.awlevel IN ({awlevel_ph})
                 GROUP BY i.stabbr
             """
+            join_key = "state_abbr"
         else:
-            sql = f"""
+            vol_sql = f"""
+                SELECT dest_cbsa AS cbsa,
+                       SUM(completions) AS completions
+                FROM completions_by_metro
+                WHERE year = ?
+                  AND cipcode = ?
+                  AND awlevel IN ({awlevel_ph})
+                GROUP BY dest_cbsa
+            """
+            ninst_sql = f"""
                 SELECT i.cbsa AS cbsa,
-                       SUM({weighted_ctotalt}) AS completions,
                        COUNT(DISTINCT CASE WHEN c.ctotalt > 0
                                            THEN c.unitid END) AS n_inst
                 FROM completions c
                 JOIN institutions i ON i.unitid = c.unitid AND i.year = c.year
-                LEFT JOIN distance_ed_status d
-                       ON d.unitid = c.unitid AND d.year = ?
                 WHERE c.year = ?
                   AND c.cipcode = ?
                   AND c.awlevel IN ({awlevel_ph})
                   AND i.cbsa IS NOT NULL
                 GROUP BY i.cbsa
             """
-        return pd.read_sql_query(
-            sql, conn, params=[dist_year, year, cipcode] + list(awlevels),
-        )
+            join_key = "cbsa"
+        params = [year, cipcode] + list(awlevels)
+        vol = pd.read_sql_query(vol_sql, conn, params=params)
+        ninst = pd.read_sql_query(ninst_sql, conn, params=params)
+        return vol.merge(ninst, on=join_key, how="left")
 
     comp_latest = _comp_by_market(latest_comp_yr).rename(
         columns={"completions": "comp_latest", "n_inst": "n_inst_latest"}
