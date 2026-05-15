@@ -87,13 +87,11 @@ st.set_page_config(
 APP_PASSWORD = "VIDATAEXPLORER"
 
 if not st.session_state.get("authenticated"):
-    for _ in range(6):
+    st.image("vi-logo.png", width=90)
+    for _ in range(5):
         st.write("")
     left, center, right = st.columns([1, 2, 1])
     with center:
-        logo_l, logo_c, logo_r = st.columns([1, 2, 1])
-        with logo_c:
-            st.image("vi-logo.png", width=200)
         st.markdown(
             "<h1 style='text-align: center;'>VI Data Explorer</h1>",
             unsafe_allow_html=True,
@@ -4169,7 +4167,7 @@ def main():
             selected_awlevels = tuple(sorted(awlevel_set))
 
     # ── Main area ─────────────────────────────────────────────────────────────
-    st.image("vi-logo.png", width=200)
+    st.image("vi-logo.png", width=90)
 
     # When the user picked the Rankings view, render that page and short-circuit
     # everything below. The Explore page sees its existing flow unchanged.
