@@ -3366,7 +3366,7 @@ def _grade_style(val) -> str:
 
 def _render_rankings_page():
     """Demand rankings — Top Programs by Market | Top Markets by Program."""
-    st.title("Demand Rankings")
+    st.title("Program/Market Ranker")
     st.caption(
         "Scored, letter-graded leaderboards. The composite score is "
         "anchored on **completions volume + long-term completions trend "
@@ -3981,6 +3981,49 @@ def main():
         """
     )
 
+    # ── Landing page (post-login picker) ──────────────────────────────────────
+    if not st.session_state.get("nav_choice"):
+        st.html(
+            """
+            <style>
+            section[data-testid="stSidebar"] { display: none !important; }
+            div[data-testid="collapsedControl"] { display: none !important; }
+            button[data-testid="baseButton-headerNoPadding"] { display: none !important; }
+            div[data-testid="stButton"] button {
+                height: 180px;
+                font-size: 1.75rem;
+                font-weight: 700;
+                border: 2px solid var(--vi-orange) !important;
+                color: var(--vi-orange) !important;
+                background: #fff !important;
+            }
+            div[data-testid="stButton"] button:hover {
+                background: var(--vi-orange) !important;
+                color: #fff !important;
+            }
+            </style>
+            """
+        )
+        for _ in range(4):
+            st.write("")
+        st.markdown(
+            "<h1 style='text-align:center; font-size:3rem; margin-bottom:2rem;'>"
+            "VI Data Explorer</h1>",
+            unsafe_allow_html=True,
+        )
+        _, c1, _gap, c2, _ = st.columns([1, 3, 0.4, 3, 1])
+        with c1:
+            if st.button("Explore", use_container_width=True, key="land_explore"):
+                st.session_state["view_mode"] = "Explore"
+                st.session_state["nav_choice"] = "Explore"
+                st.rerun()
+        with c2:
+            if st.button("Rank", use_container_width=True, key="land_rank"):
+                st.session_state["view_mode"] = "Rank"
+                st.session_state["nav_choice"] = "Rank"
+                st.rerun()
+        return
+
     # ── Sidebar ───────────────────────────────────────────────────────────────
     # ── Preset program definitions ──────────────────────────────────────────
     # Each preset: display name -> dict with "cips" (list of 6-digit codes)
@@ -3994,7 +4037,7 @@ def main():
 
     _windows = get_data_windows()
     with st.sidebar:
-        st.image("vi-logo.png", use_container_width=True)
+        st.image("vi-logo.png", width=80)
 
         # DB version diagnostic (small caption at top of sidebar)
         try:
@@ -4015,12 +4058,12 @@ def main():
         st.divider()
         view_mode = st.radio(
             "View",
-            options=["Explore", "Rankings"],
+            options=["Explore", "Rank"],
             index=0,
             key="view_mode",
             help=(
                 "Explore: deep-dive trend charts for one program + geography. "
-                "Rankings: scored, letter-graded leaderboards — either top "
+                "Rank: scored, letter-graded leaderboards — either top "
                 "programs for a chosen market, or top markets for a chosen "
                 "program."
             ),
@@ -4167,15 +4210,13 @@ def main():
             selected_awlevels = tuple(sorted(awlevel_set))
 
     # ── Main area ─────────────────────────────────────────────────────────────
-    st.image("vi-logo.png", width=90)
-
-    # When the user picked the Rankings view, render that page and short-circuit
+    # When the user picked the Rank view, render that page and short-circuit
     # everything below. The Explore page sees its existing flow unchanged.
-    if view_mode == "Rankings":
+    if view_mode == "Rank":
         _render_rankings_page()
         return
 
-    st.title("IPEDS Completions Trend Explorer")
+    st.title("Program/Market Explorer")
     if _windows.get("completions"):
         _w_min, _w_max = _windows["completions"]
         _comp_window_str = f"AY {_ay_label(_w_min)} – AY {_ay_label(_w_max)}"
