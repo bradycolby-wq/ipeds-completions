@@ -3977,6 +3977,19 @@ def main():
 
         /* Tighten title spacing */
         .block-container { padding-top: 2.2rem !important; }
+
+        /* Tighten sidebar header — pull logo up under the close button */
+        section[data-testid="stSidebar"] .block-container,
+        [data-testid="stSidebarUserContent"] {
+            padding-top: 0.5rem !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stImage"] {
+            margin-top: 0 !important;
+            margin-bottom: 0 !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+            margin-top: 0.1rem !important;
+        }
         </style>
         """
     )
