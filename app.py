@@ -87,15 +87,24 @@ st.set_page_config(
 APP_PASSWORD = "VIDATAEXPLORER"
 
 if not st.session_state.get("authenticated"):
-    st.image("vi-logo.png", width=200)
-    st.header("IPEDS Completions Explorer")
-    pw = st.text_input("Enter password", type="password")
-    if st.button("Sign in"):
-        if pw == APP_PASSWORD:
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
+    for _ in range(6):
+        st.write("")
+    left, center, right = st.columns([1, 2, 1])
+    with center:
+        logo_l, logo_c, logo_r = st.columns([1, 2, 1])
+        with logo_c:
+            st.image("vi-logo.png", width=200)
+        st.markdown(
+            "<h1 style='text-align: center;'>VI Data Explorer</h1>",
+            unsafe_allow_html=True,
+        )
+        pw = st.text_input("Enter password", type="password")
+        if st.button("Sign in", use_container_width=True):
+            if pw == APP_PASSWORD:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
     st.stop()
 
 # ── Reference data ────────────────────────────────────────────────────────────
@@ -4460,33 +4469,108 @@ def main():
                     geo_values=tuple(geo_values),
                 )
                 if not _emp_df.empty:
-                    _latest_yr = _emp_df["year"].max()
+                    _latest_yr = int(_emp_df["year"].max())
+                    _hist_years = sorted(int(y) for y in _emp_df["year"].unique())
                     _emp_latest = _emp_df[_emp_df["year"] == _latest_yr].copy()
-                    # Bolt on the LMII automation risk score per occupation
+
+                    # Per-occupation projections (CAGR is geo-best-match)
+                    _emp_proj = get_employment_projections(
+                        soc_codes=tuple(_emp_latest["occ_code"].unique()),
+                        geo_key=geo_key,
+                        geo_values=tuple(geo_values),
+                    )
+                    _cagr_map = (
+                        {} if _emp_proj.empty or "cagr" not in _emp_proj.columns
+                        else dict(zip(_emp_proj["occ_code"], _emp_proj["cagr"]))
+                    )
+
+                    # Bolt on LMII automation risk score per occupation
                     _emp_risk = get_automation_risk(
                         tuple(_emp_latest["occ_code"].unique())
                     )
+
+                    # Pivot historical employment so each year is a column
+                    _emp_pivot = _emp_df.pivot_table(
+                        index="occ_code",
+                        columns="year",
+                        values="tot_emp",
+                        aggfunc="sum",
+                    ).reset_index()
+                    _emp_pivot.columns.name = None
+                    _hist_col_map = {y: f"Emp {int(y)}" for y in _hist_years}
+                    _emp_pivot = _emp_pivot.rename(columns=_hist_col_map)
+
+                    # Project forward through 2029 using each SOC's own CAGR
+                    _proj_target_year = 2029
+                    _proj_years = list(range(_latest_yr + 1, _proj_target_year + 1))
+                    _latest_emp_map = dict(zip(
+                        _emp_latest["occ_code"], _emp_latest["tot_emp"]
+                    ))
+
+                    def _proj_val(soc, year):
+                        cagr = _cagr_map.get(soc)
+                        base = _latest_emp_map.get(soc)
+                        if cagr is None or base is None:
+                            return None
+                        return int(round(base * (1 + cagr) ** (year - _latest_yr)))
+
+                    for _y in _proj_years:
+                        _emp_pivot[f"Emp {_y} (proj.)"] = _emp_pivot["occ_code"].apply(
+                            lambda s, y=_y: _proj_val(s, y)
+                        )
+
+                    # Latest-year metadata: title, wage, risk, CAGR
+                    _meta = _emp_latest[["occ_code", "occ_title", "a_median"]].copy()
                     if not _emp_risk.empty:
-                        _emp_latest = _emp_latest.merge(
+                        _meta = _meta.merge(
                             _emp_risk[["occ_code", "risk_score"]],
                             on="occ_code",
                             how="left",
                         )
-                    emp_export = _emp_latest.rename(columns={
+                    _meta["Projected CAGR"] = _meta["occ_code"].map(_cagr_map)
+
+                    emp_export = _meta.merge(_emp_pivot, on="occ_code", how="left")
+                    emp_export = emp_export.rename(columns={
                         "occ_code": "SOC Code",
                         "occ_title": "Occupation",
-                        "tot_emp": "Total Employment",
                         "a_median": "Median Annual Wage",
                         "risk_score": "Automation Risk (1-10)",
                     })
-                    cols = [c for c in [
-                        "SOC Code", "Occupation", "Total Employment",
-                        "Median Annual Wage", "Automation Risk (1-10)",
-                    ] if c in emp_export.columns]
-                    emp_export = emp_export[cols].sort_values("Total Employment", ascending=False).reset_index(drop=True)
+
+                    _hist_cols = [
+                        _hist_col_map[y] for y in _hist_years
+                        if _hist_col_map[y] in emp_export.columns
+                    ]
+                    _proj_cols = [
+                        f"Emp {y} (proj.)" for y in _proj_years
+                        if f"Emp {y} (proj.)" in emp_export.columns
+                    ]
+                    cols = (
+                        ["SOC Code", "Occupation"]
+                        + _hist_cols
+                        + _proj_cols
+                        + [c for c in [
+                            "Median Annual Wage",
+                            "Automation Risk (1-10)",
+                            "Projected CAGR",
+                        ] if c in emp_export.columns]
+                    )
+                    emp_export = emp_export[cols]
+
+                    _sort_col = (
+                        _hist_col_map[_latest_yr]
+                        if _hist_col_map[_latest_yr] in emp_export.columns
+                        else (_hist_cols[-1] if _hist_cols else None)
+                    )
+                    if _sort_col:
+                        emp_export = emp_export.sort_values(
+                            _sort_col, ascending=False, na_position="last"
+                        ).reset_index(drop=True)
+
                     sheets.append(("Employment", emp_export, {
-                        "num_cols": ["Total Employment"],
+                        "num_cols": _hist_cols + _proj_cols,
                         "money_cols": ["Median Annual Wage"],
+                        "pct_cols": ["Projected CAGR"],
                     }))
             except Exception:
                 pass
@@ -4712,49 +4796,27 @@ def main():
             secondary_y=True,
         )
 
-    # ── Completions line(s) (primary y-axis) ──────────────────────────────
-    if "award_level_name" in df.columns:
-        for idx, (level_name, grp) in enumerate(
-            df.groupby("award_level_name", sort=False)
-        ):
-            _color = CHART_COLORS[idx % len(CHART_COLORS)]
-            fig.add_trace(
-                go.Scatter(
-                    x=grp["year"],
-                    y=grp["completions"],
-                    mode="lines+markers+text",
-                    name=level_name,
-                    line=dict(width=2.5, color=_color),
-                    marker=dict(size=8, color=_color),
-                    text=[f"{v:,}" for v in grp["completions"]],
-                    textposition="top center",
-                    textfont=dict(size=11),
-                    hovertemplate=(
-                        f"<b>{level_name}</b><br>"
-                        "%{y:,.0f} completions<extra></extra>"
-                    ),
-                    showlegend=True,
-                ),
-                secondary_y=False,
-            )
-    else:
-        df_agg = df.groupby("year")["completions"].sum().reset_index()
-        fig.add_trace(
-            go.Scatter(
-                x=df_agg["year"],
-                y=df_agg["completions"],
-                mode="lines+markers+text",
-                name="Completions",
-                line=dict(width=2.5, color="#f26822"),
-                marker=dict(size=9, color="#f26822"),
-                text=[f"{v:,}" for v in df_agg["completions"]],
-                textposition="top center",
-                textfont=dict(size=11),
-                hovertemplate="%{y:,.0f} completions<extra></extra>",
-                showlegend=True,
-            ),
-            secondary_y=False,
-        )
+    # ── Completions line (primary y-axis) ─────────────────────────────────
+    # Always sum across selected award levels so groupings (e.g.
+    # "Undergraduate Certificate" → awlevels 1/2/4/20/21) render as a
+    # single trend line rather than one line per underlying level.
+    df_agg = df.groupby("year")["completions"].sum().reset_index()
+    fig.add_trace(
+        go.Scatter(
+            x=df_agg["year"],
+            y=df_agg["completions"],
+            mode="lines+markers+text",
+            name="Completions",
+            line=dict(width=2.5, color="#f26822"),
+            marker=dict(size=9, color="#f26822"),
+            text=[f"{v:,}" for v in df_agg["completions"]],
+            textposition="top center",
+            textfont=dict(size=11),
+            hovertemplate="%{y:,.0f} completions<extra></extra>",
+            showlegend=True,
+        ),
+        secondary_y=False,
+    )
 
     # ── Projection (single unified line) ─────────────────────────────────────
     chart_years = list(all_years)
