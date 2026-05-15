@@ -4013,12 +4013,12 @@ def main():
         )
         _, c1, _gap, c2, _ = st.columns([1, 3, 0.4, 3, 1])
         with c1:
-            if st.button("Explore", use_container_width=True, key="land_explore"):
+            if st.button("🧭  Explore", use_container_width=True, key="land_explore"):
                 st.session_state["view_mode"] = "Explore"
                 st.session_state["nav_choice"] = "Explore"
                 st.rerun()
         with c2:
-            if st.button("Rank", use_container_width=True, key="land_rank"):
+            if st.button("🏆  Rank", use_container_width=True, key="land_rank"):
                 st.session_state["view_mode"] = "Rank"
                 st.session_state["nav_choice"] = "Rank"
                 st.rerun()
