@@ -4442,7 +4442,7 @@ def main():
 
             if col_3ago in yr_cols:
                 pivot["Post-COVID CAGR"] = pivot.apply(lambda r: _inst_cagr(r, col_3ago, 3), axis=1)
-            pivot["Past Decade CAGR"] = pivot.apply(lambda r: _inst_cagr(r, first_col, n_years), axis=1)
+            pivot["Long-Term CAGR"] = pivot.apply(lambda r: _inst_cagr(r, first_col, n_years), axis=1)
             pivot = pivot.rename(columns={y: yr_label(y) for y in yr_cols})
             control_map = {"Public": "Public", "Private nonprofit": "Private", "Private for-profit": "For-Profit"}
             pivot["control_name"] = pivot["control_name"].map(control_map).fillna(pivot["control_name"])
@@ -4450,7 +4450,7 @@ def main():
             pivot = pivot.drop(columns=["unitid", "stabbr"])
             pivot = pivot.rename(columns={"instnm": "Institution", "city": "City", "control_name": "Control"})
             yr_labels = [yr_label(y) for y in yr_cols]
-            cagr_cols = [c for c in ["Post-COVID CAGR", "Past Decade CAGR"] if c in pivot.columns]
+            cagr_cols = [c for c in ["Post-COVID CAGR", "Long-Term CAGR"] if c in pivot.columns]
             pivot = pivot[["Institution", "City", "Control"] + yr_labels + cagr_cols]
             last_yr_lbl = yr_label(last_col)
             pivot = pivot.sort_values(last_yr_lbl, ascending=False, na_position="last").reset_index(drop=True)
@@ -4829,7 +4829,7 @@ def main():
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric(f"{yr_label(last_yr)} Completions", f"{last_val:,}")
     m2.metric(
-        f"Past Decade CAGR ({yr_label(first_yr)} → {yr_label(last_yr)})",
+        f"Long-Term CAGR ({yr_label(first_yr)} → {yr_label(last_yr)})",
         f"{cagr_10:+.1%}" if cagr_10 is not None else "N/A",
     )
     m3.metric(
@@ -6064,7 +6064,7 @@ def main():
                         f"{emp_latest:,}",
                     )
                     em2.metric(
-                        f"Past Decade CAGR ({emp_years[0]} → {emp_years[-1]})",
+                        f"Long-Term CAGR ({emp_years[0]} → {emp_years[-1]})",
                         f"{emp_cagr:+.1%}" if emp_cagr is not None else "N/A",
                     )
                     em3.metric(
@@ -6488,7 +6488,7 @@ def main():
     st.caption(
         "Annual completions per institution for the selected filters, "
         "sorted by latest-year volume. "
-        "**Past Decade CAGR** = compound annual growth rate across the full "
+        "**Long-Term CAGR** = compound annual growth rate across the full "
         "available data window (≈10 one-year intervals between bookend years). "
         "**Post-COVID CAGR** = the same formula applied only to the three "
         "most recent years (starting AY 2020-21, the first full pandemic "
@@ -6534,7 +6534,7 @@ def main():
 
         if col_3ago in yr_cols:
             pivot["Post-COVID CAGR"] = pivot.apply(lambda r: inst_cagr(r, col_3ago, 3), axis=1)
-        pivot["Past Decade CAGR"] = pivot.apply(lambda r: inst_cagr(r, first_col, n_years), axis=1)
+        pivot["Long-Term CAGR"] = pivot.apply(lambda r: inst_cagr(r, first_col, n_years), axis=1)
         pivot = pivot.rename(columns={y: yr_label_short(y) for y in yr_cols})
         last_yr_short = yr_label_short(last_col)
         pivot = pivot.sort_values(last_yr_short, ascending=False, na_position="last").reset_index(drop=True)
@@ -6543,7 +6543,7 @@ def main():
         pivot["city"] = pivot["city"] + ", " + pivot["stabbr"]
         pivot = pivot.drop(columns=["unitid", "stabbr"])
         pivot = pivot.rename(columns={"instnm": "Institution", "city": "City", "control_name": "Control"})
-        cagr_cols = [c for c in ["Post-COVID CAGR", "Past Decade CAGR"] if c in pivot.columns]
+        cagr_cols = [c for c in ["Post-COVID CAGR", "Long-Term CAGR"] if c in pivot.columns]
         yr_short_labels = [yr_label_short(y) for y in yr_cols]
         pivot = pivot[["Institution", "City", "Control"] + yr_short_labels + cagr_cols]
 
@@ -6584,9 +6584,9 @@ def main():
                 format="%.1f%%",
                 width=cagr_col_w,
             )
-        if "Past Decade CAGR" in cagr_cols:
-            col_cfg["Past Decade CAGR"] = st.column_config.NumberColumn(
-                f"Past Decade CAGR ({yr_label_short(first_col)} → {yr_label_short(last_col)})",
+        if "Long-Term CAGR" in cagr_cols:
+            col_cfg["Long-Term CAGR"] = st.column_config.NumberColumn(
+                f"Long-Term CAGR ({yr_label_short(first_col)} → {yr_label_short(last_col)})",
                 format="%.1f%%",
                 width=cagr_col_w,
             )
