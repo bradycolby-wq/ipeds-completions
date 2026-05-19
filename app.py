@@ -83,10 +83,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Authentication gate ──────────────────────────────────────────────────────
-APP_PASSWORD = "VIDATAEXPLORER"
+# ── Authentication gate (Google OAuth via st.login) ─────────────────────────
+ALLOWED_EMAILS = {
+    "brady.colby@validatedinsights.com",
+}
 
-if not st.session_state.get("authenticated"):
+if not st.user.is_logged_in:
     st.image("vi-logo.png", width=90)
     for _ in range(5):
         st.write("")
@@ -96,13 +98,19 @@ if not st.session_state.get("authenticated"):
             "<h1 style='text-align: center;'>VI Data Explorer</h1>",
             unsafe_allow_html=True,
         )
-        pw = st.text_input("Enter password", type="password")
-        if st.button("Sign in", use_container_width=True):
-            if pw == APP_PASSWORD:
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect password.")
+        if st.button("Sign in with Google", use_container_width=True):
+            st.login()
+    st.stop()
+
+# Allowlist gate — Google sign-in succeeded but email isn't approved
+_user_email = (st.user.email or "").lower()
+if _user_email not in ALLOWED_EMAILS:
+    st.error(
+        f"This app is not authorized for {st.user.email}. "
+        "Contact Brady for access."
+    )
+    if st.button("Sign out"):
+        st.logout()
     st.stop()
 
 # ── Reference data ────────────────────────────────────────────────────────────
