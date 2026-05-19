@@ -88,6 +88,18 @@ ALLOWED_EMAILS = {
     "brady.colby@validatedinsights.com",
 }
 
+# Detect whether the [auth] section actually loaded into secrets. If it
+# didn't, Streamlit's st.user lacks is_logged_in and crashes the whole app
+# with an unhelpful AttributeError. Show a clear config error instead.
+if "auth" not in st.secrets:
+    st.error(
+        "Auth is not configured: the `[auth]` section is missing from "
+        "secrets.toml. Check that `start.sh` is the service start command "
+        "and that REDIRECT_URI, COOKIE_SECRET, GOOGLE_CLIENT_ID, and "
+        "GOOGLE_CLIENT_SECRET environment variables are set."
+    )
+    st.stop()
+
 if not st.user.is_logged_in:
     st.image("vi-logo.png", width=90)
     for _ in range(5):
