@@ -1,4 +1,6 @@
 streamlit[auth]>=1.42.0
+httpx>=0.27
+itsdangerous>=2.1
 pandas>=2.0
 numpy>=1.24
 plotly>=5.15
