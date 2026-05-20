@@ -144,12 +144,13 @@ if not st.user.is_logged_in:
         }
         .vi-login-title {
             font-family: 'Inter', system-ui, sans-serif;
-            font-size: 2.5rem;
+            font-size: 3rem;
             font-weight: 800;
             color: #111827;
             margin: 0 0 2.5rem 0;
             line-height: 1.1;
             letter-spacing: -0.02em;
+            text-align: center;
         }
 
         /* Google-branded sign-in button: white, gray border, G icon left
@@ -4114,20 +4115,45 @@ def main():
         st.html(
             """
             <style>
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
             section[data-testid="stSidebar"] { display: none !important; }
             div[data-testid="collapsedControl"] { display: none !important; }
             button[data-testid="baseButton-headerNoPadding"] { display: none !important; }
+
+            .vi-landing-title {
+                font-family: 'Inter', system-ui, sans-serif;
+                font-size: 3rem;
+                font-weight: 800;
+                color: #111827;
+                text-align: center;
+                line-height: 1.1;
+                letter-spacing: -0.02em;
+                margin: 0 0 2.5rem 0;
+            }
+
             div[data-testid="stButton"] button {
-                height: 180px;
-                font-size: 1.75rem;
-                font-weight: 700;
+                height: 200px;
+                font-family: 'Inter', system-ui, sans-serif;
+                font-size: 2.25rem;
+                font-weight: 800;
+                letter-spacing: -0.01em;
                 border: 2px solid var(--vi-orange) !important;
-                color: var(--vi-orange) !important;
-                background: #fff !important;
+                color: #ffffff !important;
+                background: var(--vi-orange) !important;
+                border-radius: 14px !important;
+                box-shadow: 0 6px 20px rgba(242, 104, 34, 0.25) !important;
+                transition: background 0.15s ease, transform 0.05s ease,
+                            box-shadow 0.15s ease !important;
             }
             div[data-testid="stButton"] button:hover {
-                background: var(--vi-orange) !important;
-                color: #fff !important;
+                background: var(--vi-orange-deep) !important;
+                border-color: var(--vi-orange-deep) !important;
+                color: #ffffff !important;
+                box-shadow: 0 8px 28px rgba(242, 104, 34, 0.35) !important;
+            }
+            div[data-testid="stButton"] button:active {
+                transform: translateY(1px) !important;
             }
             </style>
             """
@@ -4135,8 +4161,7 @@ def main():
         for _ in range(4):
             st.write("")
         st.markdown(
-            "<h1 style='text-align:center; font-size:3rem; margin-bottom:2rem;'>"
-            "VI Data Explorer</h1>",
+            '<h1 class="vi-landing-title">VI Data Explorer</h1>',
             unsafe_allow_html=True,
         )
         _, c1, _gap, c2, _ = st.columns([1, 3, 0.4, 3, 1])
