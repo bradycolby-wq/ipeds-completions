@@ -101,13 +101,71 @@ if "auth" not in st.secrets:
     st.stop()
 
 if not st.user.is_logged_in:
-    st.image("vi-logo.png", width=90)
-    for _ in range(5):
-        st.write("")
-    left, center, right = st.columns([1, 2, 1])
-    with center:
+    st.html(
+        """
+        <style>
+        /* Hide sidebar + collapse control on login screen */
+        section[data-testid="stSidebar"] { display: none !important; }
+        div[data-testid="collapsedControl"] { display: none !important; }
+
+        /* Center the card vertically + horizontally */
+        .block-container {
+            max-width: 440px !important;
+            padding-top: 6rem !important;
+        }
+
+        /* Card surface (st.container with border=True) */
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.vi-login-marker) {
+            background: #ffffff !important;
+            border: 1px solid #e5e7eb !important;
+            border-radius: 14px !important;
+            box-shadow: 0 6px 28px rgba(15, 23, 42, 0.08) !important;
+            padding: 2.25rem 2rem 2rem 2rem !important;
+        }
+
+        /* Google-branded sign-in button */
+        div[data-testid="stButton"] button {
+            background: #ffffff !important;
+            color: #3c4043 !important;
+            border: 1px solid #dadce0 !important;
+            border-radius: 6px !important;
+            font-family: 'Roboto', 'Montserrat', Arial, sans-serif !important;
+            font-weight: 500 !important;
+            font-size: 14px !important;
+            letter-spacing: 0.25px !important;
+            height: 44px !important;
+            padding-left: 44px !important;
+            text-align: center !important;
+            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path fill='%23FFC107' d='M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z'/><path fill='%23FF3D00' d='M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z'/><path fill='%234CAF50' d='M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z'/><path fill='%231976D2' d='M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z'/></svg>") !important;
+            background-repeat: no-repeat !important;
+            background-position: 14px center !important;
+            background-size: 18px 18px !important;
+            transition: box-shadow 0.15s ease, background-color 0.15s ease !important;
+        }
+        div[data-testid="stButton"] button:hover {
+            background-color: #f8f9fa !important;
+            box-shadow: 0 1px 3px rgba(60,64,67,0.2),
+                        0 1px 2px rgba(60,64,67,0.1) !important;
+            color: #202124 !important;
+        }
+        div[data-testid="stButton"] button:focus {
+            outline: none !important;
+            box-shadow: 0 0 0 3px rgba(66, 133, 244, 0.25) !important;
+        }
+
+        /* Center logo image inside the card */
+        div[data-testid="stImage"] { display: flex; justify-content: center; }
+        </style>
+        """
+    )
+    with st.container(border=True):
+        # Marker class so the :has() selector above targets only this card
+        st.html('<span class="vi-login-marker" style="display:none"></span>')
+        st.image("vi-logo.png", width=110)
         st.markdown(
-            "<h1 style='text-align: center;'>VI Data Explorer</h1>",
+            "<h1 style='text-align:center; font-size:1.6rem; "
+            "margin: 0.75rem 0 1.5rem 0; color:#1F2937;'>"
+            "VI Data Explorer</h1>",
             unsafe_allow_html=True,
         )
         if st.button("Sign in with Google", use_container_width=True):
