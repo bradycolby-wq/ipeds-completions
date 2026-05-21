@@ -4133,11 +4133,12 @@ def main():
             }
 
             div[data-testid="stButton"] button {
-                height: 200px;
+                height: 220px;
                 font-family: 'Inter', system-ui, sans-serif;
-                font-size: 2.25rem;
+                font-size: 3.25rem;
                 font-weight: 800;
                 letter-spacing: -0.01em;
+                gap: 1rem !important;
                 border: 2px solid var(--vi-orange) !important;
                 color: #ffffff !important;
                 background: var(--vi-orange) !important;
@@ -4145,6 +4146,16 @@ def main():
                 box-shadow: 0 6px 20px rgba(242, 104, 34, 0.25) !important;
                 transition: background 0.15s ease, transform 0.05s ease,
                             box-shadow 0.15s ease !important;
+            }
+            /* Material icon: white, scaled up to match the larger text */
+            div[data-testid="stButton"] button [data-testid="stIconMaterial"],
+            div[data-testid="stButton"] button span[class*="icon"] {
+                color: #ffffff !important;
+                fill: #ffffff !important;
+                font-size: 3.5rem !important;
+                width: 3.5rem !important;
+                height: 3.5rem !important;
+                line-height: 1 !important;
             }
             div[data-testid="stButton"] button:hover {
                 background: var(--vi-orange-deep) !important;
@@ -4166,12 +4177,22 @@ def main():
         )
         _, c1, _gap, c2, _ = st.columns([1, 3, 0.4, 3, 1])
         with c1:
-            if st.button("🧭  Explore", use_container_width=True, key="land_explore"):
+            if st.button(
+                "Explore",
+                icon=":material/explore:",
+                use_container_width=True,
+                key="land_explore",
+            ):
                 st.session_state["view_mode"] = "Explore"
                 st.session_state["nav_choice"] = "Explore"
                 st.rerun()
         with c2:
-            if st.button("🏆  Rank", use_container_width=True, key="land_rank"):
+            if st.button(
+                "Rank",
+                icon=":material/leaderboard:",
+                use_container_width=True,
+                key="land_rank",
+            ):
                 st.session_state["view_mode"] = "Rank"
                 st.session_state["nav_choice"] = "Rank"
                 st.rerun()
