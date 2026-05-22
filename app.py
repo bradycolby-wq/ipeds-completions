@@ -239,9 +239,17 @@ AWARD_LEVELS = {
     21: "Certificate – 300 to 899 clock hours (2020+)",
 }
 
+# VI brand chart sequence — exact order specified in vi-branding guidelines.
+# Trailing entries (#E87537, #333333) are reserves for the rare >6-series chart.
 CHART_COLORS = [
-    "#f26822", "#0f86c1", "#e87537", "#6fb6da", "#faa94d",
-    "#333333", "#666666", "#999999",
+    "#F26822",  # VI Orange
+    "#666666",  # VI Gray 2
+    "#0F86C1",  # VI Blue
+    "#FAA94D",  # Yellow Orange
+    "#999999",  # VI Gray 3
+    "#6FB6DA",  # Medium Blue
+    "#E87537",  # Medium Orange — reserve
+    "#333333",  # VI Gray 1 — reserve
 ]
 
 # State abbreviation -> FIPS code (for BLS OES state area queries)
@@ -3898,15 +3906,19 @@ def main():
         """
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
+
+        /* === VI Brand Palette (Pass 1) === */
         :root {
-            --vi-orange: #f26822;
-            --vi-orange-soft: #FFF5EE;
-            --vi-orange-deep: #D44E0F;
-            --vi-blue: #0f86c1;
-            --vi-ink: #1F2937;
-            --vi-muted: #6B7280;
-            --vi-hairline: #E5E7EB;
-            --vi-soft-bg: #F9FAFB;
+            --vi-orange: #F26822;       /* Primary accent, headlines, CTAs */
+            --vi-orange-soft: #FFF5EE;  /* Tint for hovers and badges */
+            --vi-orange-deep: #D44E0F;  /* Hover / pressed state */
+            --vi-blue: #0F86C1;         /* Links, secondary accents */
+            --vi-ink: #333333;          /* VI Gray 1 — dark emphasis */
+            --vi-muted: #666666;        /* VI Gray 2 — body / subheads */
+            --vi-gray-3: #999999;       /* VI Gray 3 — fine details, disabled */
+            --vi-gray-4: #D9D9D9;       /* VI Gray 4 — alt rows, soft borders */
+            --vi-hairline: #ECECEC;     /* Thin dividers — lighter than gray-4 */
+            --vi-soft-bg: #F9FAFB;      /* Subtle panels */
         }
         html, body, [class*="css"], .stApp, .stMarkdown, .stTextInput,
         .stSelectbox, .stMultiSelect, .stRadio, .stCheckbox, .stMetric,
@@ -3915,31 +3927,68 @@ def main():
             font-family: 'Montserrat', Arial, sans-serif !important;
         }
         .stApp { background-color: #FAFBFC; }
+        body { color: var(--vi-muted); }
 
-        /* Headings & title */
+        /* === Headings (Pass 1) ===
+           Per VI brand: H1/H2 are bold 700 VI orange. H3 anchors subsections
+           in gray-1 with the orange accent bar (handled below). */
         h1, .stTitle {
             font-family: 'Montserrat', Arial, sans-serif !important;
-            color: var(--vi-ink) !important;
-            font-weight: 800 !important;
+            color: var(--vi-orange) !important;
+            font-weight: 700 !important;
             letter-spacing: -0.015em;
             line-height: 1.15 !important;
         }
-        h2, h3, h4, h5, h6,
-        .stSidebar h1, .stSidebar h2, .stSidebar h3 {
+        h2 {
+            font-family: 'Montserrat', Arial, sans-serif !important;
+            color: var(--vi-orange) !important;
+            font-weight: 700 !important;
+            letter-spacing: -0.01em;
+        }
+        h3, h4, h5, h6 {
             font-family: 'Montserrat', Arial, sans-serif !important;
             color: var(--vi-ink) !important;
             font-weight: 700 !important;
             letter-spacing: -0.005em;
         }
+        /* Sidebar step labels in orange to mirror the brand */
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3 {
+            font-family: 'Montserrat', Arial, sans-serif !important;
+            color: var(--vi-orange) !important;
+            font-weight: 700 !important;
+        }
 
-        /* Section subheaders in MAIN content get a left orange accent.
+        /* === Page header treatment (Pass 2) ===
+           Make the main page H1 confident; treat the caption directly
+           beneath it as a subtitle with tighter spacing. */
+        [data-testid="stMain"] [data-testid="stHeading"] h1 {
+            font-size: 2.4rem !important;
+            margin-bottom: 0.35rem !important;
+        }
+        [data-testid="stMain"] [data-testid="stHeading"]:has(h1) +
+            [data-testid="stCaptionContainer"],
+        [data-testid="stMain"] [data-testid="stHeading"]:has(h1) + .stCaption {
+            font-size: 0.95rem !important;
+            line-height: 1.5 !important;
+            color: var(--vi-muted) !important;
+            margin: 0 0 1.6rem 0 !important;
+            display: block;
+        }
+
+        /* === Section subheaders with left orange accent (Pass 4) ===
            Excludes the sidebar so step-numbered controls stay clean. */
+        section.main [data-testid="stHeading"] h2,
+        [data-testid="stMain"] [data-testid="stHeading"] h2,
         section.main [data-testid="stHeading"] h3,
         [data-testid="stMain"] [data-testid="stHeading"] h3 {
             position: relative;
             padding-left: 14px;
-            margin-top: 8px;
+            margin-top: 18px;
         }
+        section.main [data-testid="stHeading"] h2::before,
+        [data-testid="stMain"] [data-testid="stHeading"] h2::before,
         section.main [data-testid="stHeading"] h3::before,
         [data-testid="stMain"] [data-testid="stHeading"] h3::before {
             content: "";
@@ -3948,32 +3997,45 @@ def main():
             background: var(--vi-orange);
         }
 
-        /* Metric cards */
+        /* === KPI tiles (Pass 2) ===
+           Thin orange accent stripe on top, more padding, larger value,
+           clearer label hierarchy. */
         [data-testid="stMetric"] {
             background: white;
             border: 1px solid var(--vi-hairline);
-            border-radius: 10px;
-            padding: 14px 16px 12px 16px;
+            border-radius: 12px;
+            padding: 22px 20px 16px 20px;
             box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
             transition: box-shadow 120ms ease, transform 120ms ease;
+            position: relative;
+            overflow: hidden;
+        }
+        [data-testid="stMetric"]::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: var(--vi-orange);
         }
         [data-testid="stMetric"]:hover {
-            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+            transform: translateY(-1px);
         }
         [data-testid="stMetricLabel"] {
             font-family: 'Montserrat', Arial, sans-serif !important;
             color: var(--vi-muted) !important;
             font-weight: 600 !important;
-            font-size: 0.72rem !important;
+            font-size: 0.7rem !important;
             text-transform: uppercase;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.06em;
         }
         [data-testid="stMetricValue"] {
             font-family: 'Montserrat', Arial, sans-serif !important;
             color: var(--vi-ink) !important;
             font-weight: 700 !important;
-            font-size: 1.7rem !important;
+            font-size: 1.95rem !important;
             line-height: 1.1 !important;
+            margin-top: 4px;
         }
         [data-testid="stMetricDelta"] {
             font-family: 'Montserrat', Arial, sans-serif !important;
@@ -3981,17 +4043,40 @@ def main():
             font-size: 0.78rem !important;
         }
 
-        /* Sidebar */
+        /* === Dataframes (Pass 3) ===
+           Modern Streamlit renders cells to canvas, so the visible header
+           row is the main hookpoint. We brand the header row orange and
+           round the outer container; alternating row colors aren't
+           possible on canvas-rendered grids. */
+        [data-testid="stDataFrame"] {
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--vi-hairline);
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        /* Header row (rendered as DOM elements above the canvas body) */
+        [data-testid="stDataFrame"] [role="columnheader"],
+        [data-testid="stDataFrame"] [data-testid="stDataFrameHeaderCell"],
+        [data-testid="stDataFrame"] .header,
+        [data-testid="stDataFrame"] thead th {
+            background: var(--vi-orange) !important;
+            color: #ffffff !important;
+            font-weight: 700 !important;
+            border-bottom: 1px solid var(--vi-orange-deep) !important;
+        }
+        [data-testid="stDataFrame"] [role="columnheader"] *,
+        [data-testid="stDataFrame"] [data-testid="stDataFrameHeaderCell"] *,
+        [data-testid="stDataFrame"] thead th * {
+            color: #ffffff !important;
+            fill: #ffffff !important;
+        }
+
+        /* Sidebar surface — orange step labels are handled above */
         section[data-testid="stSidebar"] {
             background: linear-gradient(180deg, #FFFFFF 0%, #FAFBFC 100%);
             border-right: 1px solid var(--vi-hairline);
         }
         section[data-testid="stSidebar"] hr { border-color: var(--vi-hairline); }
-        section[data-testid="stSidebar"] h2,
-        section[data-testid="stSidebar"] h3 {
-            color: var(--vi-ink) !important;
-            font-weight: 700 !important;
-        }
 
         /* Buttons */
         .stButton > button {
@@ -4079,17 +4164,30 @@ def main():
         /* Dividers — softer */
         hr { border-color: var(--vi-hairline) !important; opacity: 0.7; }
 
-        /* Dataframes — cleaner header */
-        [data-testid="stDataFrame"] {
-            border-radius: 10px;
-            overflow: hidden;
-            border: 1px solid var(--vi-hairline);
-        }
-
         /* Caption text */
         .stCaption, [data-testid="stCaptionContainer"] {
             color: var(--vi-muted) !important;
+            line-height: 1.55 !important;
         }
+
+        /* Methodology callout (Pass 4) — long st.caption blurbs that
+           live directly under a section subheader get a subtle soft-bg
+           pill with a left orange accent. Targets the caption that is
+           the immediate sibling of an h2 or h3 heading. */
+        [data-testid="stMain"] [data-testid="stHeading"]:has(h2) +
+            [data-testid="stCaptionContainer"],
+        [data-testid="stMain"] [data-testid="stHeading"]:has(h3) +
+            [data-testid="stCaptionContainer"] {
+            background: var(--vi-soft-bg);
+            border-left: 3px solid var(--vi-orange);
+            border-radius: 0 8px 8px 0;
+            padding: 10px 14px;
+            margin: 6px 0 18px 0 !important;
+            font-size: 0.86rem !important;
+        }
+
+        /* Pass 4 — rhythm: a bit more breathing room between sections */
+        [data-testid="stMain"] hr { margin: 28px 0 !important; }
 
         /* Tighten title spacing */
         .block-container { padding-top: 2.2rem !important; }
