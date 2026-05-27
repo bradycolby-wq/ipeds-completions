@@ -101,66 +101,94 @@ if "auth" not in st.secrets:
     st.stop()
 
 if not st.user.is_logged_in:
+    # Split-screen login: solid VI-Orange brand panel on the left (no
+    # gradients per VI brand standards), clean white sign-in form on the
+    # right. Montserrat throughout. The left panel is position:fixed so it
+    # escapes Streamlit's centered block-container; the block-container is
+    # then shifted into the right half to hold the actual form + button.
     st.html(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
 
-        /* Hide sidebar + collapse control on login screen */
+        /* Hide chrome on the login screen */
         section[data-testid="stSidebar"] { display: none !important; }
         div[data-testid="collapsedControl"] { display: none !important; }
+        [data-testid="stHeader"] { background: transparent !important; }
 
-        /* Soft gray page background like the reference */
-        [data-testid="stAppViewContainer"] { background: #f5f6f8 !important; }
+        [data-testid="stAppViewContainer"], [data-testid="stApp"] { background: #ffffff !important; }
 
-        /* Full-width block-container so the logo sits at the top-left of
-           the viewport and the card can center separately. */
+        /* ── Left brand panel ───────────────────────────────────────── */
+        .vi-auth-left {
+            position: fixed; top: 0; left: 0;
+            width: 50vw; height: 100vh;
+            background-color: #F26822;      /* VI Orange — solid, no gradient */
+            /* Faint swoosh / linear pattern (brand element). The SVG is
+               percent-encoded (no raw angle brackets) so Streamlit's st.html
+               sanitizer keeps the surrounding stylesheet intact. */
+            background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 600 600' preserveAspectRatio='xMaxYMin slice'%3E%3Cg fill='none' stroke='%23ffffff' stroke-width='2' stroke-opacity='0.13'%3E%3Cpath d='M-80 680 A 760 760 0 0 1 680 -80'/%3E%3Cpath d='M-80 560 A 640 640 0 0 1 560 -80'/%3E%3Cpath d='M-80 440 A 520 520 0 0 1 440 -80'/%3E%3Cpath d='M-80 320 A 400 400 0 0 1 320 -80'/%3E%3Cpath d='M-80 200 A 280 280 0 0 1 200 -80'/%3E%3C/g%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: top right;
+            background-size: 120% 120%;
+            overflow: hidden; z-index: 0;
+            display: flex; flex-direction: column; justify-content: center;
+            padding: 4rem 4.75rem;
+            box-sizing: border-box;
+        }
+        .vi-auth-mark {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 800; font-size: 1.05rem; letter-spacing: 0.18em;
+            color: #ffffff; text-transform: uppercase;
+            opacity: 0.92; margin: 0 0 1.75rem 0; position: relative; z-index: 1;
+        }
+        .vi-auth-headline {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 800; font-size: 3.4rem; line-height: 1.08;
+            color: #ffffff; margin: 0; letter-spacing: -0.01em;
+            position: relative; z-index: 1;
+        }
+        .vi-auth-tag {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 400; font-size: 1.15rem; line-height: 1.55;
+            color: rgba(255, 255, 255, 0.92);
+            margin: 1.5rem 0 0 0; max-width: 26rem;
+            position: relative; z-index: 1;
+        }
+        .vi-auth-foot {
+            position: absolute; left: 4.75rem; bottom: 2.25rem;
+            font-family: 'Montserrat', sans-serif; font-weight: 400;
+            font-size: 0.85rem; color: rgba(255, 255, 255, 0.7);
+            z-index: 1;
+        }
+
+        /* ── Right form: push Streamlit's block-container into right half ─ */
         .block-container {
-            max-width: 100% !important;
-            padding: 2rem 3rem !important;
+            margin-left: 50vw !important;
+            max-width: 50vw !important;
+            min-height: 100vh;
+            display: flex; flex-direction: column; justify-content: center;
+            padding: 2rem 5.5rem !important;
+        }
+        [data-testid="stImageContainer"] img,
+        [data-testid="stImage"] img { width: 150px !important; max-width: 150px !important; height: auto !important; }
+
+        .vi-form-eyebrow {
+            font-family: 'Montserrat', sans-serif; font-weight: 400;
+            color: #999999; font-size: 1rem; margin: 1.75rem 0 0.35rem 0;
+        }
+        .vi-form-title {
+            font-family: 'Montserrat', sans-serif; font-weight: 700;
+            font-size: 2.25rem; color: #333333; line-height: 1.1;
+            letter-spacing: -0.01em; margin: 0 0 2rem 0;
         }
 
-        /* Logo container — natural top-left placement, fixed size */
-        [data-testid="stImage"] img { max-width: 130px !important; height: auto !important; }
-
-        /* Center the card horizontally, push it down from the logo */
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.vi-login-marker) {
-            max-width: 560px !important;
-            margin: 4rem auto 0 auto !important;
-            background: #ffffff !important;
-            border: 1px solid #e5e7eb !important;
-            border-radius: 16px !important;
-            box-shadow: 0 6px 32px rgba(15, 23, 42, 0.06) !important;
-            padding: 3rem 3.5rem !important;
-        }
-
-        /* Card typography */
-        .vi-login-subtitle {
-            font-family: 'Inter', system-ui, sans-serif;
-            color: #9CA3AF;
-            font-size: 1rem;
-            font-weight: 400;
-            margin: 0 0 0.5rem 0;
-        }
-        .vi-login-title {
-            font-family: 'Inter', system-ui, sans-serif;
-            font-size: 3rem;
-            font-weight: 800;
-            color: #111827;
-            margin: 0 0 2.5rem 0;
-            line-height: 1.1;
-            letter-spacing: -0.02em;
-            text-align: center;
-        }
-
-        /* Google-branded sign-in button: white, gray border, G icon left
-           of the label, both centered as a group via flexbox. */
+        /* Google-branded sign-in button: white, gray border, G icon left. */
         div[data-testid="stButton"] button {
             background: #ffffff !important;
             color: #3c4043 !important;
             border: 1px solid #dadce0 !important;
             border-radius: 10px !important;
-            font-family: 'Roboto', 'Inter', Arial, sans-serif !important;
+            font-family: 'Roboto', 'Montserrat', Arial, sans-serif !important;
             font-weight: 500 !important;
             font-size: 15px !important;
             letter-spacing: 0.15px !important;
@@ -176,7 +204,7 @@ if not st.user.is_logged_in:
             display: inline-block;
             width: 20px;
             height: 20px;
-            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path fill='%23FFC107' d='M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z'/><path fill='%23FF3D00' d='M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z'/><path fill='%234CAF50' d='M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z'/><path fill='%231976D2' d='M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z'/></svg>");
+            background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath fill='%23FFC107' d='M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z'/%3E%3Cpath fill='%23FF3D00' d='M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z'/%3E%3Cpath fill='%234CAF50' d='M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z'/%3E%3Cpath fill='%231976D2' d='M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-size: contain;
             flex-shrink: 0;
@@ -189,25 +217,46 @@ if not st.user.is_logged_in:
         }
         div[data-testid="stButton"] button:focus {
             outline: none !important;
-            box-shadow: 0 0 0 3px rgba(66, 133, 244, 0.25) !important;
+            box-shadow: 0 0 0 3px rgba(242, 104, 34, 0.25) !important;
+        }
+
+        /* ── Responsive: stack on narrow viewports ───────────────────── */
+        @media (max-width: 820px) {
+            .vi-auth-left { display: none !important; }
+            .block-container {
+                margin-left: 0 !important;
+                max-width: 100% !important;
+                padding: 2rem 1.75rem !important;
+            }
         }
         </style>
         """
     )
-    # Top-left logo (outside the card, natural page-flow position)
-    st.image("vi-logo.png")
 
-    # Centered card
-    with st.container(border=True):
-        # Marker so the :has() selector targets only this card
-        st.html('<span class="vi-login-marker" style="display:none"></span>')
-        st.markdown(
-            '<p class="vi-login-subtitle">Please sign in to continue</p>'
-            '<h1 class="vi-login-title">VI Data Explorer</h1>',
-            unsafe_allow_html=True,
-        )
-        if st.button("Sign in with Google", use_container_width=True):
-            st.login()
+    # Brand panel rendered in its own st.html call. Streamlit's HTML
+    # sanitizer drops a <style> block when it shares a call with other
+    # markup, so the stylesheet above must be passed alone.
+    st.html(
+        """
+        <div class="vi-auth-left">
+            <p class="vi-auth-mark">Validated Insights</p>
+            <h1 class="vi-auth-headline">VI&nbsp;Data<br>Explorer</h1>
+            <p class="vi-auth-tag">IPEDS completions, program rankings, and labor-market
+               intelligence &mdash; all in one place.</p>
+            <p class="vi-auth-foot">&copy; Validated Insights, Inc. All rights reserved.</p>
+        </div>
+        """
+    )
+
+    # Right-half form content (logo renders correctly on the white side)
+    st.image("vi-logo.png")
+    st.markdown(
+        '<p class="vi-form-eyebrow">Please sign in to continue</p>'
+        '<h2 class="vi-form-title">Welcome back</h2>',
+        unsafe_allow_html=True,
+    )
+    if st.button("Sign in with Google", use_container_width=True):
+        st.login()
     st.stop()
 
 # Allowlist gate — Google sign-in succeeded but email isn't approved
