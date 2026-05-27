@@ -4262,64 +4262,121 @@ def main():
         st.html(
             """
             <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+            @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
 
             section[data-testid="stSidebar"] { display: none !important; }
             div[data-testid="collapsedControl"] { display: none !important; }
             button[data-testid="baseButton-headerNoPadding"] { display: none !important; }
 
             .vi-landing-title {
-                font-family: 'Inter', system-ui, sans-serif;
-                font-size: 3rem;
+                font-family: 'Montserrat', sans-serif;
+                font-size: 2.9rem;
                 font-weight: 800;
-                color: #111827;
+                color: #F26822;
                 text-align: center;
                 line-height: 1.1;
                 letter-spacing: -0.02em;
-                margin: 0 0 2.5rem 0;
+                margin: 0 0 0.5rem 0;
+            }
+            .vi-landing-sub {
+                font-family: 'Montserrat', sans-serif;
+                font-size: 1.05rem;
+                font-weight: 400;
+                color: #666666;
+                text-align: center;
+                margin: 0 0 2.75rem 0;
             }
 
+            /* Modern card buttons: white surface, icon badge on top, label
+               below. Vertical stack guarantees the icon and text never
+               overlap, regardless of widths. */
             div[data-testid="stButton"] button {
-                height: 220px;
-                font-family: 'Inter', system-ui, sans-serif;
-                font-size: 3.25rem;
-                font-weight: 800;
-                letter-spacing: -0.01em;
-                gap: 1rem !important;
-                border: 2px solid var(--vi-orange) !important;
-                color: #ffffff !important;
-                background: var(--vi-orange) !important;
-                border-radius: 14px !important;
-                box-shadow: 0 6px 20px rgba(242, 104, 34, 0.25) !important;
-                transition: background 0.15s ease, transform 0.05s ease,
-                            box-shadow 0.15s ease !important;
+                height: 196px;
+                display: flex !important;
+                flex-direction: column !important;
+                align-items: center !important;
+                justify-content: center !important;
+                gap: 1.15rem !important;
+                background: #ffffff !important;
+                color: #333333 !important;
+                border: 1.5px solid #ECECEC !important;
+                border-radius: 20px !important;
+                font-family: 'Montserrat', sans-serif !important;
+                font-size: 1.55rem !important;
+                font-weight: 700 !important;
+                letter-spacing: -0.01em !important;
+                box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04) !important;
+                transition: border-color 0.18s ease, box-shadow 0.18s ease,
+                            transform 0.18s ease, color 0.18s ease !important;
             }
-            /* Material icon: white, scaled up to match the larger text */
+            div[data-testid="stButton"] button p { margin: 0 !important; }
+
+            /* Stack icon above label: the inner span that holds both the
+               icon wrapper and the text markdown is flex-row by default. */
+            div[data-testid="stButton"] button span:has(> div[data-testid="stMarkdownContainer"]) {
+                flex-direction: column !important;
+                align-items: center !important;
+                gap: 1.15rem !important;
+            }
+
+            /* The span wrapping the material glyph becomes the orange circle */
+            div[data-testid="stButton"] button span:has(> [data-testid="stIconMaterial"]) {
+                width: 74px !important;
+                height: 74px !important;
+                flex: 0 0 74px !important;
+                border-radius: 50% !important;
+                background: #F26822 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                box-shadow: 0 8px 18px rgba(242, 104, 34, 0.28) !important;
+                transition: transform 0.18s ease, box-shadow 0.18s ease !important;
+            }
             div[data-testid="stButton"] button [data-testid="stIconMaterial"],
             div[data-testid="stButton"] button span[class*="icon"] {
                 color: #ffffff !important;
                 fill: #ffffff !important;
-                font-size: 3.5rem !important;
-                width: 3.5rem !important;
-                height: 3.5rem !important;
+                background: transparent !important;
+                font-size: 2.4rem !important;
+                width: auto !important;
+                height: auto !important;
                 line-height: 1 !important;
+                margin: 0 !important;
             }
+
             div[data-testid="stButton"] button:hover {
-                background: var(--vi-orange-deep) !important;
-                border-color: var(--vi-orange-deep) !important;
-                color: #ffffff !important;
-                box-shadow: 0 8px 28px rgba(242, 104, 34, 0.35) !important;
+                border-color: #F26822 !important;
+                color: #F26822 !important;
+                box-shadow: 0 14px 34px rgba(242, 104, 34, 0.18) !important;
+                transform: translateY(-4px) !important;
+                background: #ffffff !important;
             }
-            div[data-testid="stButton"] button:active {
-                transform: translateY(1px) !important;
+            div[data-testid="stButton"] button:hover span:has(> [data-testid="stIconMaterial"]) {
+                transform: scale(1.06) !important;
+                box-shadow: 0 10px 22px rgba(242, 104, 34, 0.38) !important;
+            }
+            div[data-testid="stButton"] button:active { transform: translateY(-1px) !important; }
+            div[data-testid="stButton"] button:focus {
+                outline: none !important;
+                box-shadow: 0 0 0 3px rgba(242, 104, 34, 0.22) !important;
+            }
+
+            .vi-card-cap {
+                font-family: 'Montserrat', sans-serif;
+                font-size: 0.92rem;
+                font-weight: 400;
+                color: #999999;
+                text-align: center;
+                margin: 0.85rem 0 0 0;
             }
             </style>
             """
         )
-        for _ in range(4):
+        for _ in range(3):
             st.write("")
         st.markdown(
-            '<h1 class="vi-landing-title">VI Data Explorer</h1>',
+            '<h1 class="vi-landing-title">VI Data Explorer</h1>'
+            '<p class="vi-landing-sub">Choose a workspace to get started</p>',
             unsafe_allow_html=True,
         )
         _, c1, _gap, c2, _ = st.columns([1, 3, 0.4, 3, 1])
@@ -4333,6 +4390,10 @@ def main():
                 st.session_state["view_mode"] = "Explore"
                 st.session_state["nav_choice"] = "Explore"
                 st.rerun()
+            st.markdown(
+                '<p class="vi-card-cap">Browse completions, trends &amp; geography</p>',
+                unsafe_allow_html=True,
+            )
         with c2:
             if st.button(
                 "Rank",
@@ -4343,6 +4404,10 @@ def main():
                 st.session_state["view_mode"] = "Rank"
                 st.session_state["nav_choice"] = "Rank"
                 st.rerun()
+            st.markdown(
+                '<p class="vi-card-cap">Rank programs &amp; compare competitors</p>',
+                unsafe_allow_html=True,
+            )
         return
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
