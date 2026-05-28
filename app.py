@@ -3939,6 +3939,64 @@ def _render_rank_table_markets(df: pd.DataFrame, market_grain: str, program_labe
         )
 
 
+# ── UI helpers ────────────────────────────────────────────────────────────────
+def vi_kpi_card(
+    *,
+    label: str,
+    value: str,
+    icon: str,
+    sublabel: str | None = None,
+    trend: tuple[str, str] | None = None,
+    sentiment: str | None = None,
+) -> None:
+    """Render a single VI-branded KPI card.
+
+    Designed to be called inside an ``st.columns`` cell. Pure HTML — no
+    nested Streamlit containers — so the layout is predictable and the
+    card styles live entirely in the global ``.vi-kpi`` stylesheet.
+
+    Args:
+        label: Short label under the big number, e.g. ``"Long-Term CAGR"``.
+        value: Pre-formatted big-number string, e.g. ``"3,450"`` or ``"+5.2%"``.
+        icon: Material Symbols Rounded ligature name, e.g. ``"trending_up"``.
+        sublabel: Optional muted line below the label (date range, basis).
+        trend: ``(direction, text)`` where direction is ``"up"`` | ``"down"``
+            | ``"flat"``. Renders a small colored pill in the top-right.
+        sentiment: ``"positive"`` | ``"negative"`` | ``None`` — colors the
+            big value semantic green/red (used for signed-% metrics).
+    """
+    trend_html = ""
+    if trend is not None:
+        direction, text = trend
+        arrow = {"up": "▲", "down": "▼", "flat": "→"}.get(
+            direction, ""
+        )
+        trend_html = (
+            f'<span class="vi-trend vi-trend-{direction}">'
+            f"{arrow}&nbsp;{text}</span>"
+        )
+    val_cls = ""
+    if sentiment == "positive":
+        val_cls = " vi-val-pos"
+    elif sentiment == "negative":
+        val_cls = " vi-val-neg"
+    sub_html = (
+        f'<div class="vi-kpi-sub">{sublabel}</div>' if sublabel else ""
+    )
+    st.markdown(
+        f'<div class="vi-kpi">'
+        f'<div class="vi-kpi-top">'
+        f'<span class="vi-kpi-icon material-symbols-rounded">{icon}</span>'
+        f"{trend_html}"
+        f"</div>"
+        f'<div class="vi-kpi-val{val_cls}">{value}</div>'
+        f'<div class="vi-kpi-lbl">{label}</div>'
+        f"{sub_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 def main():
     # One-time DB prep
@@ -4252,6 +4310,81 @@ def main():
         }
         section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
             margin-top: 0.1rem !important;
+        }
+
+        /* === KPI cards (Explore page) =========================== */
+        @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,500,0,0&display=block');
+
+        .vi-kpi {
+            background: #ffffff;
+            border: 1.5px solid var(--vi-hairline);
+            border-radius: 16px;
+            padding: 1.2rem 1.35rem 1.3rem 1.35rem;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+            min-height: 168px;
+            font-family: 'Montserrat', sans-serif;
+            transition: border-color 0.18s ease, box-shadow 0.18s ease,
+                        transform 0.18s ease;
+        }
+        .vi-kpi:hover {
+            border-color: var(--vi-orange);
+            box-shadow: 0 12px 28px rgba(242, 104, 34, 0.12);
+            transform: translateY(-2px);
+        }
+        .vi-kpi-top {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 0.5rem;
+        }
+        .vi-kpi-icon {
+            background: var(--vi-orange);
+            color: #ffffff;
+            width: 44px; height: 44px;
+            border-radius: 50%;
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 24px;
+            box-shadow: 0 5px 12px rgba(242, 104, 34, 0.28);
+            font-variation-settings: 'FILL' 0, 'wght' 500;
+            user-select: none;
+        }
+        .vi-trend {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 600; font-size: 0.78rem;
+            padding: 0.24rem 0.6rem;
+            border-radius: 999px;
+            white-space: nowrap;
+            line-height: 1;
+        }
+        .vi-trend-up   { color: #15803d; background: #DCFCE7; }
+        .vi-trend-down { color: #b91c1c; background: #FEE2E2; }
+        .vi-trend-flat { color: #4B5563; background: #F3F4F6; }
+        .vi-kpi-val {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 800;
+            font-size: 2.15rem;
+            color: var(--vi-ink);
+            letter-spacing: -0.02em;
+            line-height: 1.05;
+            margin-top: 0.4rem;
+        }
+        .vi-val-pos { color: #15803d; }
+        .vi-val-neg { color: #b91c1c; }
+        .vi-kpi-lbl {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: var(--vi-muted);
+            line-height: 1.25;
+            margin-top: 0.15rem;
+        }
+        .vi-kpi-sub {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 400;
+            font-size: 0.8rem;
+            color: var(--vi-gray-3);
+            margin-top: 0.1rem;
         }
         </style>
         """
@@ -5179,21 +5312,63 @@ def main():
     # Institution count
     n_inst = df_inst["unitid"].nunique()
 
+    # YoY trend chip for the Completions card — compare the latest year
+    # to the immediately prior year (if present).
+    prior_yr = last_yr - 1
+    if prior_yr in agg.index and int(agg[prior_yr]) > 0:
+        _yoy = last_val / int(agg[prior_yr]) - 1
+        _yoy_trend = (
+            "up" if _yoy > 0 else "down" if _yoy < 0 else "flat",
+            f"{_yoy:+.1%} YoY",
+        )
+    else:
+        _yoy_trend = None
+
+    def _sent(rate: float | None) -> str | None:
+        if rate is None:
+            return None
+        return "positive" if rate >= 0 else "negative"
+
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric(f"{yr_label(last_yr)} Completions", f"{last_val:,}")
-    m2.metric(
-        f"Long-Term CAGR ({yr_label(first_yr)} → {yr_label(last_yr)})",
-        f"{cagr_10:+.1%}" if cagr_10 is not None else "N/A",
-    )
-    m3.metric(
-        f"Post-COVID CAGR ({yr_label(yr_3ago)} → {yr_label(last_yr)})",
-        f"{cagr_3:+.1%}" if cagr_3 is not None else "N/A",
-    )
-    m4.metric(
-        f"Proj. CAGR ({yr_label(last_yr)} → {yr_label(proj_last_yr)})",
-        f"{cagr_proj:+.1%}" if cagr_proj is not None else "N/A",
-    )
-    m5.metric("Reporting Institutions", f"{n_inst:,}")
+    with m1:
+        vi_kpi_card(
+            label="Latest-Year Completions",
+            value=f"{last_val:,}",
+            icon="school",
+            sublabel=f"AY {yr_label(last_yr)}",
+            trend=_yoy_trend,
+        )
+    with m2:
+        vi_kpi_card(
+            label="Long-Term CAGR",
+            value=f"{cagr_10:+.1%}" if cagr_10 is not None else "N/A",
+            icon="trending_up",
+            sublabel=f"{yr_label(first_yr)} → {yr_label(last_yr)}",
+            sentiment=_sent(cagr_10),
+        )
+    with m3:
+        vi_kpi_card(
+            label="Post-COVID CAGR",
+            value=f"{cagr_3:+.1%}" if cagr_3 is not None else "N/A",
+            icon="speed",
+            sublabel=f"{yr_label(yr_3ago)} → {yr_label(last_yr)}",
+            sentiment=_sent(cagr_3),
+        )
+    with m4:
+        vi_kpi_card(
+            label="Projected CAGR",
+            value=f"{cagr_proj:+.1%}" if cagr_proj is not None else "N/A",
+            icon="insights",
+            sublabel=f"{yr_label(last_yr)} → {yr_label(proj_last_yr)}",
+            sentiment=_sent(cagr_proj),
+        )
+    with m5:
+        vi_kpi_card(
+            label="Reporting Institutions",
+            value=f"{n_inst:,}",
+            icon="account_balance",
+            sublabel="in this cohort",
+        )
 
     st.divider()
 
