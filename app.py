@@ -4405,6 +4405,27 @@ def main():
         /* === KPI cards (Explore page) =========================== */
         @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,500,0,0&display=block');
 
+        /* Google Fonts only ships the @font-face declarations for Material
+           Symbols Rounded — we have to define the utility class ourselves
+           so a <span class="material-symbols-rounded">school</span> turns
+           the ligature text into the icon glyph instead of rendering it
+           as literal text. */
+        .material-symbols-rounded {
+            font-family: 'Material Symbols Rounded' !important;
+            font-weight: normal;
+            font-style: normal;
+            line-height: 1;
+            letter-spacing: normal;
+            text-transform: none;
+            white-space: nowrap;
+            word-wrap: normal;
+            direction: ltr;
+            font-feature-settings: 'liga';
+            -webkit-font-feature-settings: 'liga';
+            -webkit-font-smoothing: antialiased;
+            text-rendering: optimizeLegibility;
+        }
+
         .vi-kpi {
             background: #ffffff;
             border: 1.5px solid var(--vi-hairline);
@@ -5867,22 +5888,35 @@ def main():
         _latest_year = int(max(df["year"].unique()))
         _base_year_growth = _latest_year - 3  # post-COVID 3-yr CAGR window
 
-        # Metric toggle (Volume / Growth / Projected) — drives BOTH the map
-        # and the ranking. State/Metro toggle is a sub-control inside the
-        # ranking column.
+        # Two toggles in one row, column-aligned to the map and ranking
+        # cards below: Volume/Growth/Projected drives the map+ranking
+        # metric; State/Metro switches the ranking grain. Sitting them as
+        # peers above the cards keeps the map and ranking visually aligned
+        # (no extra control bar inside the ranking card).
         st.markdown(
             f"<div class='vi-map-caption'>Geographic distribution · "
             f"{yr_label(_latest_year)} completions</div>",
             unsafe_allow_html=True,
         )
-        _comp_metric = st.radio(
-            "Metric",
-            ["Volume", "Growth", "Projected"],
-            index=0,
-            horizontal=True,
-            key="comp_metric",
-            label_visibility="collapsed",
-        )
+        _metric_col, _grain_col = st.columns([3, 2])
+        with _metric_col:
+            _comp_metric = st.radio(
+                "Metric",
+                ["Volume", "Growth", "Projected"],
+                index=0,
+                horizontal=True,
+                key="comp_metric",
+                label_visibility="collapsed",
+            )
+        with _grain_col:
+            _rank_grain = st.radio(
+                "Show ranking by:",
+                ["State", "Metro"],
+                index=0,
+                horizontal=True,
+                key="comp_rank_grain",
+                label_visibility="collapsed",
+            )
 
         # Resolve SOC codes once — needed only for Projected.
         _comp_soc_codes = (
@@ -5959,15 +5993,9 @@ def main():
                     st.plotly_chart(_fig_map, use_container_width=True)
 
             with _rank_col:
-                _rank_grain = st.radio(
-                    "Show ranking by:",
-                    ["State", "Metro"],
-                    index=0,
-                    horizontal=True,
-                    key="comp_rank_grain",
-                    label_visibility="collapsed",
-                )
-
+                # State/Metro toggle was hoisted up to the control row
+                # above (next to the metric toggle), so the map and
+                # ranking cards now start at the same vertical position.
                 if _rank_grain == "State":
                     _rank_df = _state_df.sort_values(
                         _state_value_col, ascending=False, na_position="last"
