@@ -4429,21 +4429,23 @@ def main():
 
         .vi-kpi {
             background: #ffffff;
-            border: 1.5px solid var(--vi-hairline);
-            border-radius: 16px;
-            padding: 1.2rem 1.35rem 1.3rem 1.35rem;
-            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+            border: 1px solid var(--vi-hairline);
+            border-radius: 14px;
+            padding: 1.1rem 1.25rem 1.2rem 1.25rem;
+            box-shadow: 0 2px 6px rgba(16, 24, 40, 0.06),
+                        0 1px 2px rgba(16, 24, 40, 0.04);
             display: flex;
             flex-direction: column;
-            gap: 0.45rem;
-            min-height: 168px;
+            gap: 0.4rem;
+            min-height: 138px;
             font-family: 'Montserrat', sans-serif;
             transition: border-color 0.18s ease, box-shadow 0.18s ease,
                         transform 0.18s ease;
         }
         .vi-kpi:hover {
             border-color: var(--vi-orange);
-            box-shadow: 0 12px 28px rgba(242, 104, 34, 0.12);
+            box-shadow: 0 14px 32px rgba(242, 104, 34, 0.12),
+                        0 2px 6px rgba(16, 24, 40, 0.06);
             transform: translateY(-2px);
         }
         .vi-kpi-top {
@@ -4505,15 +4507,17 @@ def main():
            to containers opened by vi_card(). */
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.vi-card-marker) {
             background: #ffffff !important;
-            border: 1.5px solid var(--vi-hairline) !important;
-            border-radius: 16px !important;
-            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04) !important;
+            border: 1px solid var(--vi-hairline) !important;
+            border-radius: 14px !important;
+            box-shadow: 0 2px 6px rgba(16, 24, 40, 0.06),
+                        0 1px 2px rgba(16, 24, 40, 0.04) !important;
             margin-bottom: 1.1rem !important;
             transition: border-color 0.18s ease, box-shadow 0.18s ease;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.vi-card-marker):hover {
             border-color: #E5E7EB !important;
-            box-shadow: 0 10px 28px rgba(16, 24, 40, 0.06) !important;
+            box-shadow: 0 10px 28px rgba(16, 24, 40, 0.08),
+                        0 2px 6px rgba(16, 24, 40, 0.06) !important;
         }
 
         .vi-card-head {
@@ -5725,8 +5729,8 @@ def main():
         ),
         hovermode="x unified",
         showlegend=False,
-        height=500,
-        margin=dict(t=20, b=60, l=70, r=70),
+        height=420,
+        margin=dict(t=10, b=50, l=70, r=70),
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(family="Montserrat, Arial, sans-serif", size=13, color="#333333"),
