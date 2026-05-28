@@ -4406,10 +4406,11 @@ def main():
         @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,500,0,0&display=block');
 
         /* Google Fonts only ships the @font-face declarations for Material
-           Symbols Rounded — we have to define the utility class ourselves
-           so a <span class="material-symbols-rounded">school</span> turns
-           the ligature text into the icon glyph instead of rendering it
-           as literal text. */
+           Symbols Rounded; the utility class that applies the font has to
+           be defined here. Without this rule, a span with the icon class
+           renders the ligature text (e.g. the word "school") instead of
+           the icon glyph. CAREFUL: do not put angle-bracket markup in CSS
+           comments inside st.html — it strips the whole style block. */
         .material-symbols-rounded {
             font-family: 'Material Symbols Rounded' !important;
             font-weight: normal;
