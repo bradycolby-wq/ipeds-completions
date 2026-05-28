@@ -4054,6 +4054,39 @@ def vi_card(
         yield container
 
 
+def vi_section_header(
+    title: str,
+    *,
+    icon: str | None = None,
+    subtitle: str | None = None,
+) -> None:
+    """Render a polished section header — icon badge + title + optional sub.
+
+    Drop-in replacement for ``st.divider() + st.subheader(title)`` on the
+    Explore page. Uses the same Montserrat title and orange Material icon
+    badge as the vi_card header, but flows in the document (no surrounding
+    card surface), so existing section content below it is unaffected.
+    """
+    icon_html = (
+        f'<span class="vi-card-icon material-symbols-rounded">{icon}</span>'
+        if icon
+        else ""
+    )
+    sub_html = (
+        f'<div class="vi-card-sub">{subtitle}</div>' if subtitle else ""
+    )
+    st.markdown(
+        f'<div class="vi-section-head">'
+        f'<div class="vi-card-head-left">{icon_html}'
+        f'<div class="vi-card-head-text">'
+        f'<div class="vi-section-title">{title}</div>'
+        f"{sub_html}"
+        f"</div></div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 def main():
     # One-time DB prep
@@ -4497,6 +4530,78 @@ def main():
             color: var(--vi-gray-3);
             margin-top: 0.15rem;
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+
+        /* === Section header (no surrounding card surface) ======== */
+        .vi-section-head {
+            display: flex; align-items: center;
+            margin: 2.1rem 0 1.1rem 0;
+            padding-bottom: 0.85rem;
+            border-bottom: 1px solid var(--vi-hairline);
+        }
+        .vi-section-title {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 700;
+            font-size: 1.35rem;
+            color: var(--vi-ink);
+            line-height: 1.2;
+            letter-spacing: -0.01em;
+        }
+        .vi-section-head .vi-card-sub {
+            font-size: 0.88rem;
+            white-space: normal;
+        }
+
+        /* === Sidebar polish (Explore + Rank) ==================== */
+        section[data-testid="stSidebar"] {
+            background: #FAFBFC !important;
+            border-right: 1px solid var(--vi-hairline) !important;
+        }
+        /* Numbered section headers like "### 1 · Geography" — render as
+           small uppercase orange labels, no left orange bar accent. */
+        section[data-testid="stSidebar"] h3 {
+            font-family: 'Montserrat', sans-serif !important;
+            font-weight: 700 !important;
+            font-size: 0.78rem !important;
+            color: var(--vi-orange) !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.08em !important;
+            margin: 0.4rem 0 0.55rem 0 !important;
+            padding-left: 0 !important;
+        }
+        section[data-testid="stSidebar"] h3::before {
+            display: none !important;
+        }
+        /* Hairline dividers inside the sidebar */
+        section[data-testid="stSidebar"] hr {
+            margin: 0.85rem 0 !important;
+            border-color: var(--vi-hairline) !important;
+            opacity: 1 !important;
+        }
+        /* Widget labels */
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+            font-family: 'Montserrat', sans-serif !important;
+            font-weight: 500 !important;
+            font-size: 0.88rem !important;
+            color: var(--vi-ink) !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+            color: var(--vi-gray-3) !important;
+            font-family: 'Montserrat', sans-serif !important;
+            font-size: 0.78rem !important;
+        }
+        /* Radio: orange dot when selected */
+        section[data-testid="stSidebar"]
+            [data-testid="stRadio"] input[type="radio"]:checked + div {
+            border-color: var(--vi-orange) !important;
+            background: var(--vi-orange) !important;
+        }
+        /* Selected radio label text in VI ink (slightly bolder) */
+        section[data-testid="stSidebar"]
+            [data-testid="stRadio"] label:has(input[type="radio"]:checked) {
+            color: var(--vi-orange) !important;
+            font-weight: 600 !important;
         }
         </style>
         """
@@ -5932,8 +6037,11 @@ def main():
     st.caption(f"Includes {_cip_note}  \nAward level(s): {_level_note}")
 
     # ── Search Interest Trends ────────────────────────────────────────────────
-    st.divider()
-    st.subheader("Search Interest Trends")
+    vi_section_header(
+        "Search Interest Trends",
+        icon="search",
+        subtitle="Google search demand for selected programs",
+    )
 
     _trends_ok = False
     try:
@@ -6575,8 +6683,11 @@ def main():
                 )
 
     # ── Related Employment by Occupation ─────────────────────────────────────
-    st.divider()
-    st.subheader("Related Employment by Occupation")
+    vi_section_header(
+        "Related Employment by Occupation",
+        icon="work",
+        subtitle="BLS occupational employment and wages linked via CIP–SOC",
+    )
     if _windows.get("oes"):
         _oes_min, _oes_max = _windows["oes"]
         _oes_window = f"{_oes_min} – {_oes_max}"
@@ -7137,8 +7248,11 @@ def main():
 
 
     # ── By Institution ────────────────────────────────────────────────────────
-    st.divider()
-    st.subheader("Completions by Institution")
+    vi_section_header(
+        "Completions by Institution",
+        icon="apartment",
+        subtitle="Annual awards per Title-IV institution, ranked by latest year",
+    )
     st.caption(
         "Annual completions per institution for the selected filters, "
         "sorted by latest-year volume. "
@@ -7254,8 +7368,11 @@ def main():
 
 
     # ── Graduate Outcomes (College Scorecard) ────────────────────────────────
-    st.divider()
-    st.subheader("Graduate Outcomes")
+    vi_section_header(
+        "Graduate Outcomes",
+        icon="payments",
+        subtitle="Earnings, debt, and debt-to-earnings from College Scorecard",
+    )
     st.caption(
         "**Median Earnings (4yr)** = median annual earnings of graduates "
         "measured ~4 years after program completion (most-recent pooled cohort, "
@@ -7394,8 +7511,11 @@ def main():
     # ── Distance Education Programs ──────────────────────────────────────────
     # Hidden from UI via SHOW_DISTANCE_EDUCATION_UI; backend retained.
     if SHOW_DISTANCE_EDUCATION_UI:
-        st.divider()
-        st.subheader("Distance Education Programs")
+        vi_section_header(
+            "Distance Education Programs",
+            icon="cast_for_education",
+            subtitle="Online and hybrid program coverage from IPEDS",
+        )
         if _windows.get("dep"):
             _dep_min, _dep_max = _windows["dep"]
             _dep_window = f"AY {_ay_label(_dep_min)} – AY {_ay_label(_dep_max)}"
