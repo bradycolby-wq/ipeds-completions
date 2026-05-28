@@ -4429,7 +4429,7 @@ def main():
 
         .vi-kpi {
             background: #ffffff;
-            border: 1px solid var(--vi-hairline);
+            border: none;
             border-radius: 14px;
             padding: 1.1rem 1.25rem 1.2rem 1.25rem;
             box-shadow: 0 2px 6px rgba(16, 24, 40, 0.06),
@@ -4438,13 +4438,12 @@ def main():
             flex-direction: column;
             gap: 0.4rem;
             min-height: 138px;
+            margin-bottom: 1.1rem;
             font-family: 'Montserrat', sans-serif;
-            transition: border-color 0.18s ease, box-shadow 0.18s ease,
-                        transform 0.18s ease;
+            transition: box-shadow 0.18s ease, transform 0.18s ease;
         }
         .vi-kpi:hover {
-            border-color: var(--vi-orange);
-            box-shadow: 0 14px 32px rgba(242, 104, 34, 0.12),
+            box-shadow: 0 14px 32px rgba(242, 104, 34, 0.14),
                         0 2px 6px rgba(16, 24, 40, 0.06);
             transform: translateY(-2px);
         }
@@ -4507,17 +4506,23 @@ def main():
            to containers opened by vi_card(). */
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.vi-card-marker) {
             background: #ffffff !important;
-            border: 1px solid var(--vi-hairline) !important;
+            border: none !important;
             border-radius: 14px !important;
             box-shadow: 0 2px 6px rgba(16, 24, 40, 0.06),
                         0 1px 2px rgba(16, 24, 40, 0.04) !important;
             margin-bottom: 1.1rem !important;
-            transition: border-color 0.18s ease, box-shadow 0.18s ease;
+            transition: box-shadow 0.18s ease;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:has(.vi-card-marker):hover {
-            border-color: #E5E7EB !important;
-            box-shadow: 0 10px 28px rgba(16, 24, 40, 0.08),
+            box-shadow: 0 10px 28px rgba(16, 24, 40, 0.10),
                         0 2px 6px rgba(16, 24, 40, 0.06) !important;
+        }
+
+        /* Consistent horizontal gutter between cards in an st.columns row.
+           Streamlit's default gap is tight; this gives every column row
+           the same air the vertical cards have between them. */
+        [data-testid="stHorizontalBlock"] {
+            gap: 1rem !important;
         }
 
         .vi-card-head {
@@ -4582,6 +4587,9 @@ def main():
         section[data-testid="stSidebar"] {
             background: #FAFBFC !important;
             border-right: 1px solid var(--vi-hairline) !important;
+            width: 220px !important;
+            min-width: 220px !important;
+            max-width: 220px !important;
         }
         /* Numbered section headers like "### 1 · Geography" — render as
            small uppercase orange labels, no left orange bar accent. */
@@ -4617,18 +4625,11 @@ def main():
             font-family: 'Montserrat', sans-serif !important;
             font-size: 0.78rem !important;
         }
-        /* Radio: orange dot when selected */
-        section[data-testid="stSidebar"]
-            [data-testid="stRadio"] input[type="radio"]:checked + div {
-            border-color: var(--vi-orange) !important;
-            background: var(--vi-orange) !important;
-        }
-        /* Selected radio label text in VI ink (slightly bolder) */
-        section[data-testid="stSidebar"]
-            [data-testid="stRadio"] label:has(input[type="radio"]:checked) {
-            color: var(--vi-orange) !important;
-            font-weight: 600 !important;
-        }
+        /* Radio buttons: let Streamlit's default primaryColor handle the
+           selected-state styling (a clean orange dot inside the circle).
+           Custom overrides were producing a heavy orange highlight pill
+           around the label text, which read as a button rather than a
+           selection. */
         </style>
         """
     )
