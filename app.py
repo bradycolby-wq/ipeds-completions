@@ -5752,8 +5752,8 @@ def main():
     )
 
     with vi_card(
-        title=cip_display,
-        subtitle=f"{level_str} · {geo_label}",
+        title="Completions Trend",
+        subtitle=f"{cip_display} · {level_str} · {geo_label}",
         icon="show_chart",
     ):
         st.plotly_chart(fig, use_container_width=True)
