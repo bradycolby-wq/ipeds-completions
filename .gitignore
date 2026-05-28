@@ -9,3 +9,6 @@ bls_oes_areas.csv
 .DS_Store
 Thumbs.db
 .streamlit/secrets.toml
+# Full-res 256x256 logo source stays local. The deploy uses logos_small/
+# (80x80) which is small enough to commit.
+logos/

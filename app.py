@@ -6,6 +6,7 @@ i.e. AY (YYYY-1)-YYYY. The DB stores the file's YYYY in the `year` column,
 so DB year=2023 means AY 2022-23. Re-run setup_ipeds.py to load AY 2023-24.)
 """
 
+import base64
 import sqlite3
 import urllib.request
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ import plotly.graph_objects as go
 import requests as _requests
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from PIL import Image, ImageDraw
 from plotly.subplots import make_subplots
 import streamlit as st
 
@@ -4054,6 +4056,50 @@ def vi_card(
         yield container
 
 
+# Prefer the lightweight 80x80 deploy copy when present; fall back to
+# the full-resolution local source. The dashboard renders at a 40px
+# circle either way, so 80px source is plenty.
+_LOGOS_DEPLOY_DIR = Path(__file__).parent / "logos_small"
+_LOGOS_SOURCE_DIR = Path(__file__).parent / "logos"
+_LOGOS_DIR = (
+    _LOGOS_DEPLOY_DIR if _LOGOS_DEPLOY_DIR.exists() else _LOGOS_SOURCE_DIR
+)
+
+
+@st.cache_data(show_spinner=False, max_entries=10_000)
+def vi_institution_logo_b64(unitid: int, size: int = 40) -> str | None:
+    """Return a base64 data URI for a circle-cropped institution logo.
+
+    Reads ``logos_small/<unitid>.png`` (the 80x80 deploy copy of the
+    PNGs from ``download_institution_logos.py`` + placeholder pass).
+    Resizes to ``size``, applies a circular alpha mask, and returns
+    ``data:image/png;base64,...`` ready to drop into a
+    ``st.column_config.ImageColumn`` cell. Returns ``None`` if the
+    logo file is missing.
+
+    Cached via ``st.cache_data`` keyed on ``(unitid, size)`` so the
+    same circle isn't re-rendered every rerun.
+    """
+    try:
+        uid = int(unitid)
+    except (TypeError, ValueError):
+        return None
+    src = _LOGOS_DIR / f"{uid}.png"
+    if not src.exists():
+        return None
+    try:
+        img = Image.open(src).convert("RGBA")
+    except Exception:
+        return None
+    img = img.resize((size, size), Image.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size, size), fill=255)
+    img.putalpha(mask)
+    buf = BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def vi_section_header(
     title: str,
     *,
@@ -7351,11 +7397,17 @@ def main():
         control_map = {"Public": "Public", "Private nonprofit": "Private", "Private for-profit": "For-Profit"}
         pivot["control_name"] = pivot["control_name"].map(control_map).fillna(pivot["control_name"])
         pivot["city"] = pivot["city"] + ", " + pivot["stabbr"]
+        # Attach the institution logo (circle-cropped, base64 data URI)
+        # BEFORE we drop unitid, so the column can be rendered via
+        # st.column_config.ImageColumn in the dataframe below.
+        pivot["Logo"] = pivot["unitid"].apply(
+            lambda u: vi_institution_logo_b64(u, size=40)
+        )
         pivot = pivot.drop(columns=["unitid", "stabbr"])
         pivot = pivot.rename(columns={"instnm": "Institution", "city": "City", "control_name": "Control"})
         cagr_cols = [c for c in ["Post-COVID CAGR", "Long-Term CAGR"] if c in pivot.columns]
         yr_short_labels = [yr_label_short(y) for y in yr_cols]
-        pivot = pivot[["Institution", "City", "Control"] + yr_short_labels + cagr_cols]
+        pivot = pivot[["Logo", "Institution", "City", "Control"] + yr_short_labels + cagr_cols]
 
         n_institutions = len(pivot)
         st.caption(f"{n_institutions:,} institutions reported completions for these filters")
@@ -7378,6 +7430,7 @@ def main():
         city_w = remaining - inst_w
 
         col_cfg = {
+            "Logo": st.column_config.ImageColumn("", width="small"),
             "Institution": st.column_config.TextColumn("Institution", width=inst_w),
             "City": st.column_config.TextColumn("City", width=city_w),
             "Control": st.column_config.TextColumn("Control", width=control_col_w),
@@ -7508,8 +7561,13 @@ def main():
             sc_display = sc_display.sort_values(
                 "Debt/Earnings", ascending=True, na_position="last"
             )
+            # Circle-cropped institution logo via base64 data URI (rendered
+            # by ImageColumn). Keep this column first.
+            sc_display["Logo"] = sc_display["unitid"].apply(
+                lambda u: vi_institution_logo_b64(u, size=40)
+            )
             sc_display = sc_display[
-                ["Institution", "City", "Control",
+                ["Logo", "Institution", "City", "Control",
                  "Median Earnings (4yr)", "Median Debt", "Debt/Earnings"]
             ].reset_index(drop=True)
 
@@ -7528,6 +7586,7 @@ def main():
             st.caption(f"{len(sc_display):,} program–institution combinations with earnings data")
 
             sc_col_cfg = {
+                "Logo": st.column_config.ImageColumn("", width="small"),
                 "Institution": st.column_config.TextColumn("Institution", width=250),
                 "City": st.column_config.TextColumn("City", width=160),
                 "Control": st.column_config.TextColumn("Control", width=85),
