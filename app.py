@@ -8,6 +8,7 @@ so DB year=2023 means AY 2022-23. Re-run setup_ipeds.py to load AY 2023-24.)
 
 import sqlite3
 import urllib.request
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 
@@ -387,11 +388,15 @@ def vi_choropleth(
         ),
         hovertemplate=hover_template,
     ))
+    _has_title = bool(title)
     fig.update_layout(
-        title=dict(
-            text=f"<b>{title}</b>",
-            font=dict(size=14, color=VI_INK),
-            x=0, xanchor="left",
+        title=(
+            dict(
+                text=f"<b>{title}</b>",
+                font=dict(size=14, color=VI_INK),
+                x=0, xanchor="left",
+            )
+            if _has_title else None
         ),
         geo=dict(
             scope="usa",
@@ -403,7 +408,7 @@ def vi_choropleth(
             projection_type="albers usa",
         ),
         height=height,
-        margin=dict(t=46, b=8, l=8, r=8),
+        margin=dict(t=46 if _has_title else 8, b=8, l=8, r=8),
         paper_bgcolor="white",
         font=dict(family="Montserrat, Arial, sans-serif", size=12, color=VI_INK),
     )
@@ -463,11 +468,15 @@ def vi_ranking_bar(
         ),
         customdata=df["label"],
     ))
+    _has_title = bool(title)
     fig.update_layout(
-        title=dict(
-            text=f"<b>{title}</b>",
-            font=dict(size=14, color=VI_INK),
-            x=0, xanchor="left",
+        title=(
+            dict(
+                text=f"<b>{title}</b>",
+                font=dict(size=14, color=VI_INK),
+                x=0, xanchor="left",
+            )
+            if _has_title else None
         ),
         xaxis=dict(
             title="", showgrid=True, gridcolor="#F3F4F6",
@@ -475,7 +484,7 @@ def vi_ranking_bar(
         ),
         yaxis=dict(title="", showgrid=False, automargin=True),
         height=height,
-        margin=dict(t=46, b=20, l=4, r=40),
+        margin=dict(t=46 if _has_title else 8, b=20, l=4, r=40),
         paper_bgcolor="white",
         plot_bgcolor="white",
         font=dict(family="Montserrat, Arial, sans-serif", size=11, color=VI_INK),
@@ -3997,6 +4006,54 @@ def vi_kpi_card(
     )
 
 
+@contextmanager
+def vi_card(
+    title: str | None = None,
+    *,
+    subtitle: str | None = None,
+    icon: str | None = None,
+):
+    """Render a VI-branded card with an optional header (icon + title + sub).
+
+    Use as a context manager and place any Streamlit widgets inside::
+
+        with vi_card("Completions trend", subtitle="Bachelor's · National",
+                     icon="show_chart"):
+            st.plotly_chart(fig, use_container_width=True)
+
+    The card surface (white background, hairline border, soft shadow,
+    rounded corners) is applied via the global ``.vi-card`` CSS rules,
+    scoped to ``st.container(border=True)`` via the marker class trick.
+    """
+    container = st.container(border=True)
+    with container:
+        st.html(
+            '<span class="vi-card-marker" style="display:none"></span>'
+        )
+        if title or icon:
+            icon_html = (
+                f'<span class="vi-card-icon material-symbols-rounded">'
+                f"{icon}</span>"
+                if icon
+                else ""
+            )
+            title_html = (
+                f'<div class="vi-card-title">{title}</div>' if title else ""
+            )
+            sub_html = (
+                f'<div class="vi-card-sub">{subtitle}</div>' if subtitle else ""
+            )
+            st.markdown(
+                f'<div class="vi-card-head">'
+                f'<div class="vi-card-head-left">{icon_html}'
+                f'<div class="vi-card-head-text">{title_html}{sub_html}'
+                f"</div></div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        yield container
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 def main():
     # One-time DB prep
@@ -4385,6 +4442,61 @@ def main():
             font-size: 0.8rem;
             color: var(--vi-gray-3);
             margin-top: 0.1rem;
+        }
+
+        /* === Card surface (charts, maps, ranking) ================ */
+        /* Streamlit's st.container(border=True) gives us a
+           stVerticalBlockBorderWrapper; the marker scopes the styling
+           to containers opened by vi_card(). */
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.vi-card-marker) {
+            background: #ffffff !important;
+            border: 1.5px solid var(--vi-hairline) !important;
+            border-radius: 16px !important;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04) !important;
+            margin-bottom: 1.1rem !important;
+            transition: border-color 0.18s ease, box-shadow 0.18s ease;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(.vi-card-marker):hover {
+            border-color: #E5E7EB !important;
+            box-shadow: 0 10px 28px rgba(16, 24, 40, 0.06) !important;
+        }
+
+        .vi-card-head {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 1rem;
+            padding-bottom: 0.85rem;
+            border-bottom: 1px solid var(--vi-hairline);
+            margin-bottom: 0.9rem;
+        }
+        .vi-card-head-left {
+            display: flex; align-items: center; gap: 0.85rem; min-width: 0;
+        }
+        .vi-card-head-text { min-width: 0; }
+        .vi-card-icon {
+            background: var(--vi-orange-soft);
+            color: var(--vi-orange);
+            width: 40px; height: 40px;
+            border-radius: 10px;
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 22px;
+            font-variation-settings: 'FILL' 0, 'wght' 500;
+            user-select: none; flex: 0 0 40px;
+        }
+        .vi-card-title {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 700;
+            font-size: 1.05rem;
+            color: var(--vi-ink);
+            line-height: 1.2;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .vi-card-sub {
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 400;
+            font-size: 0.82rem;
+            color: var(--vi-gray-3);
+            margin-top: 0.15rem;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         </style>
         """
@@ -5370,14 +5482,9 @@ def main():
             sublabel="in this cohort",
         )
 
-    st.divider()
-
     # ── Chart (dual-axis: completions line + programs offered bars) ──────────
-    chart_title = (
-        f"<b>{cip_display}</b>"
-        f"<br><sup style='color:#999999'>{level_str} · {geo_label}</sup>"
-    )
-
+    # Title now lives in the surrounding vi_card header (see below); the
+    # Plotly fig no longer carries one, so its top margin can be tightened.
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     # ── Programs Offered bars (secondary y-axis, behind everything) ───────
@@ -5480,7 +5587,6 @@ def main():
     chart_tick_labels = [yr_label(y) for y in chart_years]
 
     fig.update_layout(
-        title=dict(text=chart_title, font=dict(size=15), x=0, xanchor="left"),
         xaxis=dict(
             tickmode="array",
             tickvals=chart_years,
@@ -5492,8 +5598,8 @@ def main():
         ),
         hovermode="x unified",
         showlegend=False,
-        height=540,
-        margin=dict(t=100, b=60, l=70, r=70),
+        height=500,
+        margin=dict(t=20, b=60, l=70, r=70),
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(family="Montserrat, Arial, sans-serif", size=13, color="#333333"),
@@ -5518,7 +5624,12 @@ def main():
         secondary_y=True,
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    with vi_card(
+        title=cip_display,
+        subtitle=f"{level_str} · {geo_label}",
+        icon="show_chart",
+    ):
+        st.plotly_chart(fig, use_container_width=True)
 
     # Projection methodology note
     if projection and proj_components:
@@ -5632,15 +5743,19 @@ def main():
             zerolinecolor="#999999",
             zerolinewidth=1,
         ),
-        title=dict(text="Year-over-Year % Change", font=dict(size=13), x=0, xanchor="left"),
         height=220,
-        margin=dict(t=40, b=60, l=70, r=20),
+        margin=dict(t=10, b=60, l=70, r=20),
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(family="Montserrat, Arial, sans-serif", size=12, color="#333333"),
         showlegend=False,
     )
-    st.plotly_chart(fig_yoy, use_container_width=True)
+    with vi_card(
+        title="Year-over-Year % Change",
+        subtitle="Actual and projected annual change in completions",
+        icon="bar_chart",
+    ):
+        st.plotly_chart(fig_yoy, use_container_width=True)
 
     # ── Completions geographic distribution (map + ranking) ──────────────────
     if not all_cips:
@@ -5726,12 +5841,17 @@ def main():
                 _fig_map = vi_choropleth(
                     _state_df["stabbr"],
                     _state_df[_state_value_col],
-                    title=_map_title,
+                    title="",
                     colorbar_title=_value_label,
                     hover_format=_value_format,
                     hover_label=_value_label,
                 )
-                st.plotly_chart(_fig_map, use_container_width=True)
+                with vi_card(
+                    title=_map_title,
+                    subtitle=f"{_value_label} by state",
+                    icon="public",
+                ):
+                    st.plotly_chart(_fig_map, use_container_width=True)
 
             with _rank_col:
                 _rank_grain = st.radio(
@@ -5750,10 +5870,11 @@ def main():
                     _rank_fig = vi_ranking_bar(
                         _rank_df["stabbr"],
                         _rank_df[_state_value_col],
-                        title=_rank_title,
+                        title="",
                         value_label=_value_label,
                         value_format=_value_format,
                     )
+                    _rank_header = _rank_title
                 else:  # Metro
                     if _comp_metric == "Volume":
                         _metro_df = run_completions_by_metro_query(
@@ -5782,19 +5903,24 @@ def main():
                     if _metro_df is None or _metro_df.empty:
                         st.info("No metro-level data for this metric.")
                         _rank_fig = None
+                        _rank_header = _rank_title.replace("States", "Metros")
                     else:
                         _rank_fig = vi_ranking_bar(
                             _metro_df["cbsa_name"],
                             _metro_df[_metro_value_col],
-                            title=(
-                                _rank_title.replace("States", "Metros")
-                            ),
+                            title="",
                             value_label=_value_label,
                             value_format=_value_format,
                         )
+                        _rank_header = _rank_title.replace("States", "Metros")
 
                 if _rank_fig is not None:
-                    st.plotly_chart(_rank_fig, use_container_width=True)
+                    with vi_card(
+                        title=_rank_header,
+                        subtitle=f"Top by {_value_label.lower()}",
+                        icon="leaderboard",
+                    ):
+                        st.plotly_chart(_rank_fig, use_container_width=True)
 
     # Footnote listing CIP codes and award levels included
     if all_cips:
