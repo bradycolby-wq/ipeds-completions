@@ -4625,11 +4625,19 @@ def main():
             font-family: 'Montserrat', sans-serif !important;
             font-size: 0.78rem !important;
         }
-        /* Radio buttons: let Streamlit's default primaryColor handle the
-           selected-state styling (a clean orange dot inside the circle).
-           Custom overrides were producing a heavy orange highlight pill
-           around the label text, which read as a button rather than a
-           selection. */
+        /* Radio buttons: Streamlit's BaseWeb radio paints an orange
+           background pill behind the LABEL TEXT of a selected option
+           (separate from the radio circle itself), which reads like a
+           toggle button rather than a selection. Kill the pill — keep
+           the orange circle indicator as the selected-state cue. The
+           pill lives on the direct child div of the label that wraps
+           the stMarkdownContainer. */
+        section[data-testid="stSidebar"]
+            [data-testid="stRadio"]
+            label[data-baseweb="radio"]
+            > div:has(> [data-testid="stMarkdownContainer"]) {
+            background-color: transparent !important;
+        }
         </style>
         """
     )
