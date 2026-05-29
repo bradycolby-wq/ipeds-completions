@@ -6608,12 +6608,13 @@ def main():
                     )
                 else:
                     _search_metric = "Volume"
-                    st.caption(
-                        "Tip: load per-state historical Trends "
-                        "(`python load_google_trends_state_time.py "
-                        f"--cips {','.join(cip_patterns) if cip_patterns else '...'}`) "
-                        "to enable a Growth view that compares the most "
-                        "recent 12 months against the prior 12 months by state."
+                    vi_footnote(
+                        "**Search Interest Trends — Growth view.** "
+                        "Per-state historical Trends data isn't loaded for "
+                        "the current CIP selection. To enable a Growth view "
+                        "(most-recent 12 months vs prior 12 months, by state), "
+                        "run `python load_google_trends_state_time.py "
+                        f"--cips {','.join(cip_patterns) if cip_patterns else '...'}`."
                     )
 
                 # Layout — same 3:2 in Volume mode; state-only in Growth.
@@ -7364,8 +7365,9 @@ def main():
                     f"- **{row.occ_code}** {row.occ_title}{_risk_tag(row.risk_score)}"
                     for row in occ_list.itertuples()
                 )
-                st.caption(
-                    f"Aggregate includes **{len(occ_list)}** related occupations "
+                vi_footnote(
+                    f"**Occupations in the aggregate.** "
+                    f"Includes **{len(occ_list)}** related occupations "
                     f"(SOC codes mapped via CIP-SOC crosswalk · automation risk "
                     f"per LMI Institute 2019 OES Automation Exposure Index, "
                     f"1 = low / 10 = high):  \n{occ_bullets}"
