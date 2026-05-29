@@ -87,9 +87,30 @@ st.set_page_config(
 )
 
 # ── Authentication gate (Google OAuth via st.login) ─────────────────────────
-ALLOWED_EMAILS = {
-    "brady.colby@validatedinsights.com",
+# Anyone with a Validated Insights Google Workspace identity can sign in.
+# Individual addresses can still be allowlisted on top of the domain check
+# (useful for outside contractors / temp access without provisioning a
+# @validatedinsights.com account).
+ALLOWED_EMAIL_DOMAINS = {
+    "validatedinsights.com",
 }
+ALLOWED_EMAILS: set[str] = set()  # extra addresses outside the domain
+
+
+def _email_is_authorized(email: str) -> bool:
+    """Return True if `email` matches an allowed domain or address.
+
+    Comparison is case-insensitive and tolerates surrounding whitespace.
+    A blank/None email is never authorized.
+    """
+    if not email:
+        return False
+    e = email.strip().lower()
+    if e in ALLOWED_EMAILS:
+        return True
+    if "@" in e and e.rsplit("@", 1)[1] in ALLOWED_EMAIL_DOMAINS:
+        return True
+    return False
 
 # Detect whether the [auth] section actually loaded into secrets. If it
 # didn't, Streamlit's st.user lacks is_logged_in and crashes the whole app
@@ -263,11 +284,12 @@ if not st.user.is_logged_in:
     st.stop()
 
 # Allowlist gate — Google sign-in succeeded but email isn't approved
-_user_email = (st.user.email or "").lower()
-if _user_email not in ALLOWED_EMAILS:
+if not _email_is_authorized(st.user.email or ""):
     st.error(
         f"This app is not authorized for {st.user.email}. "
-        "Contact Brady for access."
+        "Access is open to Validated Insights staff "
+        "(any @validatedinsights.com Google account). "
+        "Contact Brady for outside-contractor access."
     )
     if st.button("Sign out"):
         st.logout()
@@ -4100,6 +4122,36 @@ def vi_institution_logo_b64(unitid: int, size: int = 40) -> str | None:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+# Footnote buffer — populated during page rendering, drained at the
+# bottom by vi_render_footnotes(). Lives at module level so any code
+# path on the page can append. main() resets it at the top of every
+# rerun so we never carry over stale notes between interactions.
+_FOOTNOTES_BUFFER: list[str] = []
+
+
+def vi_footnote(text: str) -> None:
+    """Queue a methodology/source note for the page footer.
+
+    Each call appends to the module-level buffer. ``vi_render_footnotes()``
+    at the bottom of the page emits the whole list inside a collapsible
+    "Footnotes and sources" expander, in the order they were queued.
+    """
+    if text and text.strip():
+        _FOOTNOTES_BUFFER.append(text.strip())
+
+
+def vi_render_footnotes() -> None:
+    """Render every queued footnote in a single collapsible at page foot."""
+    if not _FOOTNOTES_BUFFER:
+        return
+    with st.expander("Footnotes and sources", expanded=False):
+        for i, note in enumerate(_FOOTNOTES_BUFFER):
+            if i > 0:
+                st.divider()
+            st.markdown(note)
+    _FOOTNOTES_BUFFER.clear()
+
+
 def vi_section_header(
     title: str,
     *,
@@ -4135,6 +4187,10 @@ def vi_section_header(
 
 # ── App ───────────────────────────────────────────────────────────────────────
 def main():
+    # Reset the footnote buffer at the top of every rerun so notes from
+    # the previous interaction don't carry over into this page's footer.
+    _FOOTNOTES_BUFFER.clear()
+
     # One-time DB prep
     ensure_cbsa_index()
     ensure_award_levels()
@@ -5039,13 +5095,14 @@ def main():
         _comp_window_str = f"AY {_ay_label(_w_min)} – AY {_ay_label(_w_max)}"
     else:
         _comp_window_str = "available academic years"
-    st.caption(
+    vi_footnote(
+        "**Program/Market Explorer.** "
         "Total degrees and certificates awarded by Title-IV-eligible, "
         "IPEDS-reporting U.S. postsecondary institutions, "
         "counted by 6-digit CIP code and award level. "
         f"Coverage: {_comp_window_str}. "
-        "| Source: NCES IPEDS Completions Survey (file C{year}_A, "
-        "first-major awards only)."
+        "_Source: NCES IPEDS Completions Survey (file C{year}_A, "
+        "first-major awards only)._"
     )
 
     # Determine geo_key for query — "All states" is functionally national
@@ -5836,8 +5893,8 @@ def main():
             )
         _blend_rate = proj_components.get("blended_rate")
         _rate_str = f" Blended rate: {_blend_rate:+.1%}/yr." if _blend_rate is not None else ""
-        st.caption(
-            f"**Projection** blends {', '.join(_parts)}.{_rate_str}"
+        vi_footnote(
+            f"**Projection methodology.** Blends {', '.join(_parts)}.{_rate_str}"
         )
 
     # ── YoY change bar chart ───────────────────────────────────────────────────
@@ -6122,7 +6179,10 @@ def main():
         _cip_bullets = "  \n".join(f"- **{l}**" for l in selected_cip_labels)
         _cip_note = f"**{len(selected_cip_labels)}** CIP code(s):  \n{_cip_bullets}"
     _level_note = "All award levels" if all_levels else ", ".join(selected_level_labels)
-    st.caption(f"Includes {_cip_note}  \nAward level(s): {_level_note}")
+    vi_footnote(
+        f"**Filters in this view.** Includes {_cip_note}  \n"
+        f"Award level(s): {_level_note}"
+    )
 
     # ── Search Interest Trends ────────────────────────────────────────────────
     vi_section_header(
@@ -6277,9 +6337,12 @@ def main():
                 and df_per_cip["cipcode"].nunique() > 1
             )
 
-            _trend_colors = [
-                "#8B5CF6", "#0f86c1", "#e87537", "#10B981", "#EF4444",
-                "#F59E0B", "#EC4899", "#14B8A6", "#6366F1", "#F97316",
+            # VI brand chart sequence — same order used elsewhere in the
+            # app via the module-level CHART_COLORS. Extended with a few
+            # tonal variants so the >8 CIP case still has distinct lines.
+            _trend_colors = CHART_COLORS + [
+                "#FFC09A",  # light orange tint
+                "#B9DDF0",  # light blue tint
             ]
 
             if _show_volume:
@@ -6324,7 +6387,7 @@ def main():
 
                     _show_legend = True
                     _chart_title = (
-                        "<b>Estimated Monthly Search Volume by Program</b>"
+                        "<b>National Estimated Monthly Search Volume by Program</b>"
                     )
                 else:
                     # Single CIP: volume area + interest dashed line
@@ -6332,9 +6395,9 @@ def main():
                         x=_volume_series["date"],
                         y=_volume_series["volume"],
                         mode="lines", name="Est. Volume",
-                        line=dict(width=2, color="#8B5CF6"),
+                        line=dict(width=2, color="#F26822"),
                         fill="tozeroy",
-                        fillcolor="rgba(139, 92, 246, 0.1)",
+                        fillcolor="rgba(242, 104, 34, 0.10)",
                         hovertemplate=(
                             "<b>%{x|%b %Y}</b><br>"
                             "Volume: %{y:,.0f}<extra></extra>"
@@ -6353,7 +6416,7 @@ def main():
 
                     _show_legend = True
                     _chart_title = (
-                        "<b>Estimated Monthly Search Volume Over Time</b>"
+                        "<b>National Estimated Monthly Search Volume Over Time</b>"
                     )
 
                 fig_trend.update_yaxes(
@@ -6405,9 +6468,9 @@ def main():
                     fig_trend.add_trace(go.Scatter(
                         x=df_trend["date"], y=df_trend["interest"],
                         mode="lines", name="Search Interest",
-                        line=dict(width=2, color="#8B5CF6"),
+                        line=dict(width=2, color="#F26822"),
                         fill="tozeroy",
-                        fillcolor="rgba(139, 92, 246, 0.1)",
+                        fillcolor="rgba(242, 104, 34, 0.10)",
                         hovertemplate=(
                             "<b>%{x|%b %Y}</b><br>"
                             "Interest: %{y:.0f}<extra></extra>"
@@ -6781,7 +6844,8 @@ def main():
         _oes_window = f"{_oes_min} – {_oes_max}"
     else:
         _oes_window = "available years"
-    st.caption(
+    vi_footnote(
+        "**Related Employment by Occupation.** "
         "Total employment and median annual wages for occupations linked to "
         "the selected CIP code(s) via the NCES CIP-SOC crosswalk. "
         "Pre-2019 BLS data uses SOC 2010 codes, which are bridged to SOC 2018 "
@@ -6789,14 +6853,14 @@ def main():
         "remapped to their primary detail code. **Projected CAGR** is the "
         "weighted-average BLS Employment Projections growth rate (current → "
         "+10 yr) across the matched occupations, weighted by latest-year "
-        f"employment. **Automation Risk** is the LMI Institute Automation "
+        "employment. **Automation Risk** is the LMI Institute Automation "
         "Exposure Index (2019 OES vintage), a 1–10 score derived from O*NET "
         "ability, work-activity, and work-context attributes; 1 = least "
         "exposed, 10 = most exposed. The aggregate shown is weighted by "
         f"latest-year employment. Coverage: {_oes_window}. "
-        "| Sources: BLS Occupational Employment & Wage Statistics (OEWS), "
+        "_Sources: BLS Occupational Employment & Wage Statistics (OEWS), "
         "BLS Employment Projections, NCES CIP-to-SOC Crosswalk, "
-        "LMI Institute Automation Exposure Index (2019 OES)."
+        "LMI Institute Automation Exposure Index (2019 OES)._"
     )
 
     if all_cips:
@@ -7309,8 +7373,8 @@ def main():
                 # Automation-risk methodology footnote
                 _risk_n = occ_list["risk_score"].notna().sum()
                 if _risk_n > 0:
-                    st.caption(
-                        ":information_source: **About the automation-risk score.** "
+                    vi_footnote(
+                        "**About the automation-risk score.** "
                         "The LMI Institute Automation Exposure Index ranks each "
                         "occupation on a 1–10 scale (1 = least exposed, 10 = "
                         "most exposed) using O*NET data on abilities, work "
@@ -7329,9 +7393,9 @@ def main():
                         "real-world adoption, and in many occupations "
                         "automation increases productivity rather than "
                         "eliminating jobs. "
-                        "| Source: LMI Institute, Automation Exposure Index "
+                        "_Source: LMI Institute, Automation Exposure Index "
                         "(2019 OES vintage), [lmiontheweb.org]"
-                        "(https://www.lmiontheweb.org)."
+                        "(https://www.lmiontheweb.org)._"
                     )
 
 
@@ -7341,7 +7405,8 @@ def main():
         icon="apartment",
         subtitle="Annual awards per Title-IV institution, ranked by latest year",
     )
-    st.caption(
+    vi_footnote(
+        "**Completions by Institution.** "
         "Annual completions per institution for the selected filters, "
         "sorted by latest-year volume. "
         "**Long-Term CAGR** = compound annual growth rate across the full "
@@ -7351,7 +7416,7 @@ def main():
         "academic year), isolating current momentum from pre-pandemic trend. "
         "Both use `(end / start)^(1/n) − 1`. Institutions with zero "
         "completions in either bookend year show no CAGR. "
-        "| Source: NCES IPEDS Completions Survey."
+        "_Source: NCES IPEDS Completions Survey._"
     )
 
     if df_inst.empty:
@@ -7468,7 +7533,8 @@ def main():
         icon="payments",
         subtitle="Earnings, debt, and debt-to-earnings from College Scorecard",
     )
-    st.caption(
+    vi_footnote(
+        "**Graduate Outcomes (College Scorecard).** "
         "**Median Earnings (4yr)** = median annual earnings of graduates "
         "measured ~4 years after program completion (most-recent pooled cohort, "
         "Title-IV-aided completers only, IRS earnings). "
@@ -7476,8 +7542,8 @@ def main():
         "completion. **Debt/Earnings** = the ratio of those two — lower is "
         "better. Outcomes are reported at the **4-digit CIP** level, so a "
         "row may pool several closely-related 6-digit programs. "
-        "| Source: U.S. Department of Education College Scorecard, "
-        "Field-of-Study (Most-Recent-Cohorts) file."
+        "_Source: U.S. Department of Education College Scorecard, "
+        "Field-of-Study (Most-Recent-Cohorts) file._"
     )
 
     _scorecard_ok = False
@@ -7948,7 +8014,10 @@ def main():
                 f"Data refreshes hourly."
             )
 
-
+    # ── Footnotes + sources (collapsible, page foot) ─────────────────────
+    # Drains the _FOOTNOTES_BUFFER populated by vi_footnote() calls during
+    # this rerun and renders them inside a single expander.
+    vi_render_footnotes()
 
 
 if __name__ == "__main__":
