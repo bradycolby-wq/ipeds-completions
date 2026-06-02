@@ -570,6 +570,19 @@ def main():
         conn.commit()
         print("  Loaded into oes_employment table.")
 
+        # Normalize metro area codes to match the IPEDS institutions fix. BLS
+        # adopted the 2020 OMB CBSA re-delineation in 2024 (e.g. Cleveland
+        # 0017460 -> 0017410, Dayton 0019380 -> 0019430). The app maps a
+        # selected metro to a single BLS area_code, so without this an affected
+        # metro's employment view returns only the newest year. normalize_oes
+        # folds an old code into its successor only when the OES data shows a
+        # clean year handoff (no overlap), so distinct metros are never merged.
+        # canonicalize_institutions is idempotent and ensures the crosswalk
+        # exists if this script is run standalone.
+        from normalize_cbsa import canonicalize_institutions, normalize_oes
+        canonicalize_institutions(conn)
+        normalize_oes(conn)
+
     # ── Stage 2: Load CIP-SOC crosswalk ──────────────────────────────────────
     print("\n[2/4] Loading CIP-SOC crosswalk...")
     cip_soc = load_cip_soc_crosswalk()

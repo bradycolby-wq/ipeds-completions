@@ -493,6 +493,18 @@ def main():
             if csv_path:
                 load_distance_ed_status(conn, year, csv_path)
 
+    # --- Metro (CBSA) code normalization ---------------------------------
+    # IPEDS adopted the 2020 OMB CBSA re-delineation in its 2023 HD files,
+    # renumbering many metros (e.g. Cleveland 17460->17410, Dayton
+    # 19380->19430). The metro filter keys off the per-year CBSA code and the
+    # dropdown only offers the current code, so without this an affected metro
+    # returns only its most recent years. Canonicalize each institution to its
+    # current CBSA across all years. See normalize_cbsa.py.
+    log("\n[final] Normalizing CBSA codes (institutions)...")
+    from normalize_cbsa import canonicalize_institutions, backfill_cbsa_names
+    canonicalize_institutions(conn)
+    backfill_cbsa_names(conn)
+
     log("\n[final] Creating completions_view...")
     conn.executescript(VIEW_DDL)
     conn.commit()
