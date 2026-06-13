@@ -7,6 +7,7 @@ so DB year=2023 means AY 2022-23. Re-run setup_ipeds.py to load AY 2023-24.)
 """
 
 import base64
+import csv
 import sqlite3
 import urllib.request
 from contextlib import contextmanager
@@ -752,6 +753,91 @@ def expand_cip_patterns(cip_patterns: tuple) -> tuple:
             if new not in expanded:
                 expanded.append(new)
     return tuple(expanded)
+
+
+# ── Market Outlook (third-party growth forecasts) ──────────────────────────
+# A small, hand-curated library of commercial market-research CAGRs lives in
+# `market_outlook.csv` (committed to the repo, so it ships with both local and
+# Streamlit Cloud deploys — no DB re-upload needed to update it). These are
+# *market-revenue* growth projections, NOT completions growth: they provide
+# external context for how fast each education market is expected to expand
+# relative to the broad higher-ed market. See market_outlook.csv for sources.
+_MARKET_OUTLOOK_CSV = Path(__file__).parent / "market_outlook.csv"
+
+
+@st.cache_data(show_spinner=False)
+def load_market_outlook() -> dict[str, dict]:
+    """Return {segment_key: {...}} from market_outlook.csv.
+
+    Each record carries display_name, the CIP prefixes that map to it,
+    median/min/max CAGR (as fractions), source count, an is_benchmark flag
+    (the broad higher-ed market used as the comparison baseline), and a short
+    geography note. Returns {} if the file is missing so the feature simply
+    no-ops rather than erroring.
+    """
+    if not _MARKET_OUTLOOK_CSV.exists():
+        return {}
+    out: dict[str, dict] = {}
+    with open(_MARKET_OUTLOOK_CSV, encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            key = (row.get("segment_key") or "").strip()
+            if not key:
+                continue
+            prefixes = tuple(
+                p.strip() for p in (row.get("cip_prefixes") or "").split(";") if p.strip()
+            )
+            try:
+                out[key] = {
+                    "display_name": (row.get("display_name") or "").strip(),
+                    "cip_prefixes": prefixes,
+                    "cagr_median": float(row["cagr_median"]),
+                    "cagr_min": float(row["cagr_min"]),
+                    "cagr_max": float(row["cagr_max"]),
+                    "n_sources": int(row.get("n_sources") or 0),
+                    "is_benchmark": str(row.get("is_benchmark") or "0").strip() in ("1", "true", "True"),
+                    "geo_note": (row.get("geo_note") or "").strip(),
+                }
+            except (KeyError, ValueError):
+                continue
+    return out
+
+
+def match_market_segment(cip_patterns: tuple) -> dict | None:
+    """Map the selected CIP code(s) to one market-outlook segment, or None.
+
+    Uses broad CIP-family prefix matching (e.g. any 52.xxxx → Business &
+    Management). Each selected code votes for the segment whose prefix it
+    matches; the plurality winner is returned only if it covers a majority
+    of the selected codes — otherwise the selection is too mixed to label
+    confidently and we return None (the card is then hidden). The broad
+    higher-ed benchmark is never returned as a foreground segment. Returns
+    None when "All CIP codes" is selected (empty cip_patterns).
+    """
+    if not cip_patterns:
+        return None
+    outlook = load_market_outlook()
+    if not outlook:
+        return None
+    segments = {k: v for k, v in outlook.items() if not v["is_benchmark"]}
+
+    votes: dict[str, int] = {}
+    for code in cip_patterns:
+        clean = str(code).replace("%", "")
+        best_key, best_len = None, 0
+        for key, seg in segments.items():
+            for pre in seg["cip_prefixes"]:
+                # Longest matching prefix wins (so 51.38 beats a bare 51).
+                if clean.startswith(pre) and len(pre) > best_len:
+                    best_key, best_len = key, len(pre)
+        if best_key:
+            votes[best_key] = votes.get(best_key, 0) + 1
+
+    if not votes:
+        return None
+    winner = max(votes, key=votes.get)
+    if votes[winner] * 2 < len(cip_patterns):  # not a majority → too mixed
+        return None
+    return segments[winner]
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -4030,6 +4116,57 @@ def vi_kpi_card(
     )
 
 
+def vi_market_outlook_banner(segment: dict, benchmark: dict | None) -> None:
+    """Render the full-width Market Outlook callout for a matched segment.
+
+    Shows the segment's median projected market CAGR, the spread and source
+    count behind it, and — when the broad higher-ed benchmark is available —
+    a pill expressing how far above/below that baseline this market sits.
+    These are third-party *market-revenue* forecasts, labeled as such so they
+    read as external context rather than IPEDS-derived completions metrics.
+    """
+    med = segment["cagr_median"]
+    delta_html = ""
+    if benchmark is not None:
+        diff = med - benchmark["cagr_median"]
+        if abs(diff) < 0.005:
+            direction, word = "flat", "in line with"
+        elif diff > 0:
+            direction, word = "up", "above"
+        else:
+            direction, word = "down", "below"
+        arrow = {"up": "▲", "down": "▼", "flat": "→"}[direction]
+        delta_html = (
+            f'<span class="vi-mkt-delta vi-mkt-delta-{direction}">'
+            f"{arrow}&nbsp;{abs(diff) * 100:.1f} pts {word} the "
+            f'~{benchmark["cagr_median"] * 100:.1f}% higher-ed market</span>'
+        )
+
+    geo = f" · {segment['geo_note']}" if segment.get("geo_note") else ""
+    foot = (
+        f"Range {segment['cagr_min'] * 100:.1f}–{segment['cagr_max'] * 100:.1f}% "
+        f"across {segment['n_sources']} third-party forecasts · "
+        f"projected market revenue, not completions{geo}"
+    )
+    st.markdown(
+        f'<div class="vi-mkt">'
+        f'<div class="vi-mkt-main">'
+        f'<div class="vi-mkt-eyebrow">'
+        f'<span class="material-symbols-rounded">query_stats</span>Market Outlook'
+        f"</div>"
+        f'<div class="vi-mkt-seg">{segment["display_name"]}</div>'
+        f'<div class="vi-mkt-foot">{foot}</div>'
+        f"</div>"
+        f'<div class="vi-mkt-num">'
+        f'<span class="vi-mkt-val">≈ {med * 100:.1f}%</span>'
+        f'<span class="vi-mkt-unit">/ yr projected</span>'
+        f"</div>"
+        f"{delta_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 @contextmanager
 def vi_card(
     title: str | None = None,
@@ -4601,6 +4738,47 @@ def main():
             color: var(--vi-gray-3);
             margin-top: 0.1rem;
         }
+
+        /* === Market Outlook banner (Explore page) =============== */
+        /* Full-width callout giving external market-revenue growth
+           context for the selected program, vs. the broad higher-ed
+           market. Visually distinct from the white completions KPI
+           tiles (tinted surface + left accent) so it doesn't read as
+           one of the IPEDS-derived metrics. */
+        .vi-mkt {
+            background: linear-gradient(180deg, #FFF7F2 0%, #FFFDFB 100%);
+            border: 1px solid #FAE0CF;
+            border-left: 5px solid var(--vi-orange);
+            border-radius: 14px;
+            padding: 1.0rem 1.35rem 1.05rem 1.3rem;
+            margin-bottom: 1.1rem;
+            font-family: 'Montserrat', sans-serif;
+            box-shadow: 0 2px 6px rgba(16, 24, 40, 0.05);
+            display: flex; align-items: center; flex-wrap: wrap;
+            gap: 0.6rem 1.6rem;
+        }
+        .vi-mkt-main { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1 1 auto; }
+        .vi-mkt-eyebrow {
+            display: flex; align-items: center; gap: 0.5rem;
+            font-weight: 700; font-size: 0.72rem; letter-spacing: 0.08em;
+            text-transform: uppercase; color: var(--vi-orange);
+        }
+        .vi-mkt-eyebrow .material-symbols-rounded { font-size: 18px; }
+        .vi-mkt-seg { font-weight: 700; font-size: 1.05rem; color: var(--vi-ink); line-height: 1.2; }
+        .vi-mkt-foot { font-weight: 400; font-size: 0.78rem; color: var(--vi-gray-3); margin-top: 0.1rem; }
+        .vi-mkt-num { display: flex; align-items: baseline; gap: 0.7rem; flex: 0 0 auto; }
+        .vi-mkt-val {
+            font-weight: 800; font-size: 2.0rem; color: var(--vi-ink);
+            letter-spacing: -0.02em; line-height: 1;
+        }
+        .vi-mkt-unit { font-weight: 600; font-size: 0.9rem; color: var(--vi-muted); }
+        .vi-mkt-delta {
+            font-weight: 700; font-size: 0.82rem;
+            padding: 0.26rem 0.66rem; border-radius: 999px; white-space: nowrap; line-height: 1;
+        }
+        .vi-mkt-delta-up   { color: #15803d; background: #DCFCE7; }
+        .vi-mkt-delta-down { color: #b91c1c; background: #FEE2E2; }
+        .vi-mkt-delta-flat { color: #4B5563; background: #F3F4F6; }
 
         /* === Card surface (charts, maps, ranking) ================ */
         /* Streamlit's st.container(border=True) gives us a
@@ -5683,6 +5861,14 @@ def main():
         if rate is None:
             return None
         return "positive" if rate >= 0 else "negative"
+
+    # ── Market Outlook callout ────────────────────────────────────────────
+    # External market-revenue growth context for the selected program, shown
+    # only when the CIP selection maps confidently to a tracked segment.
+    _mkt_segment = match_market_segment(cip_patterns)
+    if _mkt_segment is not None:
+        _mkt_benchmark = load_market_outlook().get("higher_ed")
+        vi_market_outlook_banner(_mkt_segment, _mkt_benchmark)
 
     m1, m2, m3, m4, m5 = st.columns(5)
     with m1:

@@ -1,0 +1,7 @@
+segment_key,display_name,cip_prefixes,cagr_median,cagr_min,cagr_max,n_sources,is_benchmark,geo_note
+higher_ed,Higher Education (overall),,0.1210,0.0980,0.1940,9,1,Broad market benchmark (US & global)
+nursing,Nursing Education,51.38;51.39;51.16,0.0530,0.0299,0.0700,9,0,Mostly global; includes 2 US forecasts
+legal,Continuing Legal Education,22,0.0801,0.0710,0.0865,5,0,Mostly US
+programming,Programming Education,11,0.1500,0.1010,0.1931,5,0,Global
+vocational,Vocational & Technical Training,47;48;46;49;12;01,0.0900,0.0712,0.1930,6,0,Global
+business,Business & Management,52,0.0960,0.0560,0.1560,19,0,Global; MBA, executive & leadership ed blended
